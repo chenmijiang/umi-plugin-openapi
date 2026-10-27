@@ -1,0 +1,1 @@
+npx oxlint && npx oxfmt --check . && npx vitest run --reporter=minimal
