@@ -1,29 +1,25 @@
 import { existsSync, mkdirSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
-import { generateService, getSchema } from "@umijs/openapi";
+import { generateService } from "@umijs/openapi";
 import { rimraf } from "rimraf";
 import serveStatic from "serve-static";
 import { type IApi } from "umi";
+
+import { getSchema } from "./core";
 
 type ConfigItem = {
   requestLibPath?: string;
   schemaPath: string;
   mock?: boolean;
   projectName?: string;
-  apiPrefix?: string | Function;
+  apiPrefix?: Parameters<typeof generateService>[0]["apiPrefix"];
   namespace?: string;
   serversPath?: string;
   nullable?: boolean;
   dataFields?: string[];
   isCamelCase?: boolean;
-  hook?: {
-    afterOpenApiDataInited?: Function;
-    customFunctionName?: Function;
-    customTypeName?: Function;
-    customClassName?: Function;
-    customFileNames?: Function;
-  };
+  hook?: Parameters<typeof generateService>[0]["hook"];
 };
 
 function winPath(path: string): string {
@@ -43,25 +39,83 @@ export default function (api: IApi): void {
     config: {
       schema({ zod }) {
         const itemSchema = zod.object({
-          requestLibPath: zod.string().optional(),
-          schemaPath: zod.string(),
-          mock: zod.boolean().optional(),
-          projectName: zod.string().optional(),
-          apiPrefix: zod.union([zod.string(), zod.function()]).optional(),
-          namespace: zod.string().optional(),
-          serversPath: zod.string().optional(),
-          nullable: zod.boolean().optional(),
-          dataFields: zod.array(zod.string()).optional(),
-          isCamelCase: zod.boolean().optional(),
+          requestLibPath: zod.string().optional().describe("Custom request method import path."),
+          schemaPath: zod
+            .string()
+            .describe("URL or local file path to a Swagger 2.0 or OpenAPI 3.0 document."),
+          mock: zod
+            .boolean()
+            .optional()
+            .describe("Generate mock files in the project's mock directory."),
+          projectName: zod
+            .string()
+            .optional()
+            .describe(
+              "Project name used for the generated service subdirectory and Swagger UI entry.",
+            ),
+          apiPrefix: zod
+            .union([zod.string(), zod.function()])
+            .optional()
+            .describe("API request path prefix, provided as a string or a function."),
+          namespace: zod
+            .string()
+            .optional()
+            .describe("Namespace for generated TypeScript types. Defaults to API."),
+          serversPath: zod
+            .string()
+            .optional()
+            .describe(
+              "Service output directory. This plugin overrides it with <cwd>/src/services.",
+            ),
+          nullable: zod
+            .boolean()
+            .optional()
+            .describe(
+              "Use null instead of optional properties in generated types. Defaults to false.",
+            ),
+          dataFields: zod
+            .array(zod.string())
+            .optional()
+            .describe(
+              "Response data field names to use when extracting the generated response type.",
+            ),
+          isCamelCase: zod
+            .boolean()
+            .optional()
+            .describe(
+              "Use camelCase for generated file and request function names. Defaults to true.",
+            ),
           hook: zod
             .object({
-              afterOpenApiDataInited: zod.function().optional(),
-              customFunctionName: zod.function().optional(),
-              customTypeName: zod.function().optional(),
-              customClassName: zod.function().optional(),
-              customFileNames: zod.function().optional(),
+              afterOpenApiDataInited: zod
+                .function()
+                .optional()
+                .describe(
+                  "Transform the OpenAPI document after initialization and return the updated document.",
+                ),
+              customFunctionName: zod
+                .function()
+                .optional()
+                .describe("Customize the generated request function name from operation data."),
+              customTypeName: zod
+                .function()
+                .optional()
+                .describe("Customize the generated type name from operation data."),
+              customClassName: zod
+                .function()
+                .optional()
+                .describe("Customize the generated class name from a tag name."),
+              customFileNames: zod
+                .function()
+                .optional()
+                .describe(
+                  "Return custom file names for an operation based on its definition, API path, and HTTP method.",
+                ),
             })
-            .optional(),
+            .optional()
+            .describe(
+              "Hooks for transforming the OpenAPI document and customizing generated names.",
+            ),
         });
         return zod.union([zod.array(itemSchema), itemSchema]);
       },
@@ -152,7 +206,7 @@ export default App;
     });
   }
 
-  const genOpenAPIFiles = async (openAPIConfig: any) => {
+  const genOpenAPIFiles = async (openAPIConfig: ConfigItem) => {
     if (api.env !== "development") return;
     const openAPIJson = await getSchema(openAPIConfig.schemaPath);
     writeFileSync(
@@ -173,7 +227,7 @@ export default App;
       console.error(error);
     }
   });
-  const genAllFiles = async (openAPIConfig: any) => {
+  const genAllFiles = async (openAPIConfig: ConfigItem) => {
     const pageConfig = require(join(api.cwd, "package.json"));
     const mockFolder = openAPIConfig.mock ? join(api.cwd, "mock") : undefined;
     const serversFolder = join(api.cwd, "src", "services");

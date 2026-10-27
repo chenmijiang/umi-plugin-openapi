@@ -4,8 +4,14 @@
   "categories": {
     "correctness": "error"
   },
-  "rules": {},
+  "rules": {
+    "typescript/no-explicit-any": "error"
+  },
   "env": {
     "builtin": true
+  },
+  "options": {
+    "typeAware": true,
+    "typeCheck": true
   }
 }
