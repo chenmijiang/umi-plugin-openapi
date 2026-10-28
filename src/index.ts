@@ -4,8 +4,8 @@ import { dirname, join } from "path";
 import serveStatic from "serve-static";
 import { type IApi } from "umi";
 
+import { configSchema, type ConfigItem } from "./config";
 import { generateService, getSchema } from "./core";
-import type { ConfigItem } from "./core/types";
 
 function winPath(path: string): string {
   const isExtendedLengthPath = path.startsWith("\\\\?\\");
@@ -22,89 +22,8 @@ export default function (api: IApi): void {
   api.describe({
     key: "openAPI",
     config: {
-      schema({ zod }) {
-        const itemSchema = zod.object({
-          requestLibPath: zod.string().optional().describe("Custom request method import path."),
-          schemaPath: zod
-            .string()
-            .describe(
-              "URL or local file path to a Swagger 2.0 or OpenAPI 3.0 document, processed by the bundled generator. HTTPS requires a trusted certificate; use NODE_EXTRA_CA_CERTS for an internal CA.",
-            ),
-          mock: zod
-            .boolean()
-            .optional()
-            .describe("Generate mock files in the project's mock directory."),
-          projectName: zod
-            .string()
-            .optional()
-            .describe(
-              "Project name used for the generated service subdirectory and Swagger UI entry.",
-            ),
-          apiPrefix: zod
-            .union([zod.string(), zod.function()])
-            .optional()
-            .describe("API request path prefix, provided as a string or a function."),
-          namespace: zod
-            .string()
-            .optional()
-            .describe("Namespace for generated TypeScript types. Defaults to API."),
-          serversPath: zod
-            .string()
-            .optional()
-            .describe(
-              "Service output directory. This plugin overrides it with <cwd>/src/services.",
-            ),
-          nullable: zod
-            .boolean()
-            .optional()
-            .describe(
-              "Use null instead of optional properties in generated types. Defaults to false.",
-            ),
-          dataFields: zod
-            .array(zod.string())
-            .optional()
-            .describe(
-              "Response data field names to use when extracting the generated response type.",
-            ),
-          isCamelCase: zod
-            .boolean()
-            .optional()
-            .describe(
-              "Use camelCase for generated file and request function names. Defaults to true.",
-            ),
-          hook: zod
-            .object({
-              afterOpenApiDataInited: zod
-                .function()
-                .optional()
-                .describe(
-                  "Transform the OpenAPI document after initialization and return the updated document.",
-                ),
-              customFunctionName: zod
-                .function()
-                .optional()
-                .describe("Customize the generated request function name from operation data."),
-              customTypeName: zod
-                .function()
-                .optional()
-                .describe("Customize the generated type name from operation data."),
-              customClassName: zod
-                .function()
-                .optional()
-                .describe("Customize the generated class name from a tag name."),
-              customFileNames: zod
-                .function()
-                .optional()
-                .describe(
-                  "Return custom file names for an operation based on its definition, API path, and HTTP method.",
-                ),
-            })
-            .optional()
-            .describe(
-              "Hooks for transforming the OpenAPI document and customizing generated names.",
-            ),
-        });
-        return zod.union([zod.array(itemSchema), itemSchema]);
+      schema() {
+        return configSchema;
       },
     },
     enableBy: api.EnableBy.config,
@@ -217,12 +136,11 @@ export default App;
   const genAllFiles = async (openAPIConfig: ConfigItem) => {
     const pageConfig = require(join(api.cwd, "package.json"));
     const mockFolder = openAPIConfig.mock ? join(api.cwd, "mock") : undefined;
-    const serversFolder = join(api.cwd, "src", "services");
-    // 如果mock 文件不存在，创建一下
+    const serversFolder = join(api.paths.absSrcPath!, "services");
+
     if (mockFolder && !existsSync(mockFolder)) {
       mkdirSync(mockFolder);
     }
-    // 如果mock 文件不存在，创建一下
     if (serversFolder && !existsSync(serversFolder)) {
       mkdirSync(serversFolder);
     }
@@ -243,7 +161,6 @@ export default App;
         await Promise.all(openAPIConfig.map((item) => genAllFiles(item)));
         return;
       }
-      // TODO: 用户没有 src/services 会报错
       await genAllFiles(openAPIConfig);
     },
   });

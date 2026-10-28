@@ -2,20 +2,6 @@ import type { OpenAPIObject, OperationObject, SchemaObject } from "openapi3-ts/o
 
 import type { APIDataType } from "./serviceGenerator";
 
-export type ConfigItem = {
-  requestLibPath?: string;
-  schemaPath: string;
-  mock?: boolean;
-  projectName?: string;
-  apiPrefix?: GenerateServiceProps["apiPrefix"];
-  namespace?: string;
-  serversPath?: string;
-  nullable?: boolean;
-  dataFields?: string[];
-  isCamelCase?: boolean;
-  hook?: GenerateServiceProps["hook"];
-};
-
 export type GenerateServiceProps = {
   requestLibPath?: string;
   requestOptionsType?: string;

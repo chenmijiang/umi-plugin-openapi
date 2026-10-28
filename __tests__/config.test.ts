@@ -1,79 +1,90 @@
-import { createRequire } from "node:module";
+import { describe, expect, expectTypeOf, test } from "vitest";
 
-import { describe, expect, test } from "vitest";
+import { configItemSchema, configSchema, type ConfigItem } from "../src/config";
+import type { GenerateServiceProps } from "../src/core/types";
 
-import openAPIPlugin from "../src/index";
-
-const require = createRequire(import.meta.url);
-const umiRequire = createRequire(require.resolve("umi"));
-const coreRequire = createRequire(umiRequire.resolve("@umijs/core"));
-const { zod } = coreRequire("@umijs/utils");
-
-function getConfigSchema() {
-  const sentinel = new Error("stop after config registration");
-  let schema = zod.never();
-
-  expect(() =>
-    openAPIPlugin({
-      onStart() {},
-      EnableBy: { config: "config" },
-      describe({
-        config,
-      }: {
-        config: { schema: (options: { zod: typeof zod }) => typeof schema };
-      }) {
-        schema = config.schema({ zod });
-        // Stop before the plugin creates or removes any directories.
-        throw sentinel;
-      },
-    } as unknown as Parameters<typeof openAPIPlugin>[0]),
-  ).toThrow(sentinel);
-
-  return schema;
-}
-
-const schema = getConfigSchema();
 const schemaPath = "./openapi.json";
 
 describe("openAPI config schema", () => {
   test.each([{ config: { schemaPath } }, { config: [{ schemaPath }] }])(
     "accepts a minimal schemaPath config: $config",
     ({ config }) => {
-      const result = schema.safeParse(config);
-
-      expect(result.success).toBe(true);
-      if (result.success) {
-        expect(result.data).toEqual(config);
-      }
+      expect(configSchema.parse(config)).toEqual(config);
     },
   );
 
-  test("accepts and retains a single hook callback", () => {
-    const result = schema.safeParse({
+  test("retains optional configuration fields", () => {
+    const config = {
       schemaPath,
-      hook: { customFunctionName: () => "customName" },
-    });
+      requestLibPath: "import { request } from '@umijs/max'",
+      mock: true,
+      projectName: "gen",
+      apiPrefix: "/api",
+      namespace: "API",
+      nullable: true,
+      dataFields: ["data"],
+      isCamelCase: false,
+    };
 
-    expect(result.success).toBe(true);
-    if (result.success) {
-      expect(result.data).toEqual({
-        schemaPath,
-        hook: { customFunctionName: expect.any(Function) },
-      });
-      expect(result.data.hook.customFunctionName()).toBe("customName");
-    }
+    expect(configSchema.parse(config)).toEqual(config);
+  });
+
+  test("retains supported callbacks rather than stripping them from parsed configuration", () => {
+    const input: ConfigItem = {
+      schemaPath,
+      apiPrefix: ({ namespace, path }) => `/${namespace}${path}`,
+      hook: {
+        afterOpenApiDataInited: (document) => document,
+        customFunctionName: () => "listPets",
+        customTypeName: () => "Pet",
+        customClassName: (tagName) => `${tagName}Service`,
+        customOptionsDefaultValue: () => ({ credentials: "include" }),
+        customType: (_schema, _namespace, originGetType) => originGetType(_schema),
+        customFileNames: () => ["pets"],
+      },
+    };
+
+    expect(configItemSchema.parse(input)).toEqual({
+      schemaPath,
+      apiPrefix: expect.any(Function),
+      hook: {
+        afterOpenApiDataInited: expect.any(Function),
+        customFunctionName: expect.any(Function),
+        customTypeName: expect.any(Function),
+        customClassName: expect.any(Function),
+        customOptionsDefaultValue: expect.any(Function),
+        customType: expect.any(Function),
+        customFileNames: expect.any(Function),
+      },
+    });
+  });
+
+  test("preserves generator-compatible configuration and exact callback signatures", () => {
+    expectTypeOf<ConfigItem>().toExtend<GenerateServiceProps>();
+    expectTypeOf<ConfigItem["apiPrefix"]>().toEqualTypeOf<GenerateServiceProps["apiPrefix"]>();
+    expectTypeOf<ConfigItem["hook"]>().toEqualTypeOf<GenerateServiceProps["hook"]>();
   });
 
   test.each([
     { config: {}, field: "schemaPath" },
     { config: { schemaPath: 123 }, field: "schemaPath" },
     { config: { schemaPath, mock: "true" }, field: "mock" },
-    {
-      config: { schemaPath, hook: { customFunctionName: "not a function" } },
-      field: "hook.customFunctionName",
-    },
+    { config: { schemaPath, apiPrefix: 123 }, field: "apiPrefix" },
+    { config: { schemaPath, hook: "not an object" }, field: "hook" },
+    ...[
+      "afterOpenApiDataInited",
+      "customFunctionName",
+      "customTypeName",
+      "customOptionsDefaultValue",
+      "customClassName",
+      "customType",
+      "customFileNames",
+    ].map((hook) => ({
+      config: { schemaPath, hook: { [hook]: "not a function" } },
+      field: `hook.${hook}`,
+    })),
   ])("rejects invalid $field", ({ config, field }) => {
-    const result = schema.safeParse(config);
+    const result = configSchema.safeParse(config);
 
     expect(result.success).toBe(false);
     if (!result.success) {
@@ -83,4 +94,11 @@ describe("openAPI config schema", () => {
       );
     }
   });
+
+  test.each([null, "./openapi.json", [{ schemaPath }, {}]])(
+    "rejects an invalid configuration or array item: %j",
+    (config) => {
+      expect(configSchema.safeParse(config).success).toBe(false);
+    },
+  );
 });

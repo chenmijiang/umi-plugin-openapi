@@ -179,7 +179,7 @@ async function run(
   }
 }
 
-async function fixture(context: TestContext) {
+async function fixture(context: TestContext, sourceDirectory = "src") {
   context.signal.throwIfAborted();
   const cwd = await mkdtemp(join(tmpdir(), "umi-openapi-plugin-"));
   const requests: string[] = [];
@@ -227,7 +227,8 @@ async function fixture(context: TestContext) {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("No schema server port");
     const origin = `http://127.0.0.1:${address.port}`;
-    await mkdir(join(cwd, "src/pages"), { recursive: true });
+    const sourcePath = join(cwd, sourceDirectory);
+    await mkdir(join(sourcePath, "pages"), { recursive: true });
     await mkdir(join(cwd, "node_modules"));
     for (const name of [
       "umi",
@@ -246,11 +247,11 @@ async function fixture(context: TestContext) {
       JSON.stringify({ name: "integration-app", private: true }),
     );
     await writeFile(
-      join(cwd, "src/pages/index.tsx"),
+      join(sourcePath, "pages/index.tsx"),
       "export default function Home() { return <h1>Integration app</h1>; }",
     );
     await writeFile(
-      join(cwd, "src/request.ts"),
+      join(sourcePath, "request.ts"),
       `
 export default async function request<T>(path: string, options: { method?: string; params?: Record<string, unknown> }): Promise<T> {
   const url = new URL(path, ${JSON.stringify(origin)});
@@ -371,12 +372,14 @@ async function consumeServices(
   projects: string[],
   signal: AbortSignal,
   runCommand: (args: string[]) => Promise<string>,
+  sourceDirectory = "src",
 ) {
   signal.throwIfAborted();
+  const sourcePrefix = sourceDirectory ? `${sourceDirectory}/` : "";
   await writeFile(
     join(cwd, "consume.ts"),
     `
-${projects.map((project) => `import { fetchPet as ${project} } from './src/services/${project}/pets';`).join("\n")}
+${projects.map((project) => `import { fetchPet as ${project} } from './${sourcePrefix}services/${project}/pets';`).join("\n")}
 async function main() {
   const results = [];
   ${projects
@@ -411,7 +414,7 @@ void main().catch(error => { console.error(error); throw error; });
         outDir: "compiled",
         types: [],
       },
-      include: ["consume.ts", "src/request.ts", "src/services/**/*.ts"],
+      include: ["consume.ts", `${sourcePrefix}request.ts`, `${sourcePrefix}services/**/*.ts`],
     }),
   );
   await runCommand([compilerCLI, "--project", "tsconfig.consume.json"]);
@@ -499,6 +502,19 @@ describe("published plugin in real Umi projects", () => {
       }
     },
   );
+
+  test("generates usable services beside root pages without creating src", async (context) => {
+    const app = await fixture(context, "");
+    try {
+      await app.configure(app.config("alpha"));
+      await app.run([umiCLI, "openapi"]);
+      await consumeServices(app.cwd, ["alpha"], context.signal, app.run, "");
+      expect(app.requests).toEqual(["GET /alpha/pets/42?search=hello+world"]);
+      await expect(stat(join(app.cwd, "src"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await app.cleanup();
+    }
+  }, 240_000);
 
   test("rejects invalid configuration through Umi config validation", async (context) => {
     const app = await fixture(context);
