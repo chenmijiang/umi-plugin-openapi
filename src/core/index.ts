@@ -1,3 +1,10 @@
+import type { OpenAPIObject } from "openapi3-ts/oas30";
+import converter from "swagger2openapi";
+
+import { mockGenerator } from "./mockGenerator";
+import { ServiceGenerator } from "./serviceGenerator";
+import type { GenerateServiceProps } from "./types";
+
 export async function getSchema(schemaPath: string, authorization?: string): Promise<unknown> {
   if (schemaPath.startsWith("http")) {
     try {
@@ -15,6 +22,84 @@ export async function getSchema(schemaPath: string, authorization?: string): Pro
   // Node caches modules by resolved filename, which may differ for symlinked paths.
   const resolvedPath = require.resolve(schemaPath);
   delete require.cache[resolvedPath];
-  const schema = require(resolvedPath);
+  const schema: unknown = require(resolvedPath);
   return schema;
+}
+
+const getImportStatement = (requestLibPath?: string) => {
+  if (requestLibPath && requestLibPath.startsWith("import")) {
+    return requestLibPath;
+  }
+  if (requestLibPath) {
+    return `import request from '${requestLibPath}'`;
+  }
+  return `import { request } from "umi"`;
+};
+
+async function getOpenAPIConfig(
+  schemaPath: string,
+  authorization?: string,
+): Promise<OpenAPIObject> {
+  const schema = await getSchema(schemaPath, authorization);
+  if (
+    !schema ||
+    typeof schema !== "object" ||
+    !("info" in schema) ||
+    !schema.info ||
+    typeof schema.info !== "object" ||
+    !("version" in schema.info) ||
+    typeof schema.info.version !== "string" ||
+    !("paths" in schema) ||
+    !schema.paths ||
+    typeof schema.paths !== "object"
+  ) {
+    throw new Error(`[openAPI]: Invalid schema: ${schemaPath}`);
+  }
+  if (!("swagger" in schema) || !schema.swagger) {
+    return schema as OpenAPIObject;
+  }
+  const options = await converter.convertObj(
+    schema as Parameters<typeof converter.convertObj>[0],
+    {},
+  );
+  console.log("[openAPI]: 💺 将 Swagger 转化为 openAPI");
+  // Both libraries describe OpenAPI 3.0; openapi3-ts also declares extension index signatures.
+  const openAPI = options.openapi as unknown as OpenAPIObject;
+  return openAPI;
+}
+
+export async function generateService({
+  authorization,
+  requestLibPath,
+  schemaPath,
+  mockFolder,
+  nullable = false,
+  requestOptionsType = "{[key: string]: any}",
+  ...rest
+}: Omit<GenerateServiceProps, "schemaPath"> & { schemaPath: string }): Promise<void> {
+  const openAPI = await getOpenAPIConfig(schemaPath, authorization);
+  const requestImportStatement = getImportStatement(requestLibPath);
+
+  const serviceGenerator = new ServiceGenerator(
+    {
+      namespace: "API",
+      requestOptionsType,
+      requestImportStatement,
+      enumStyle: "string-literal",
+      nullable,
+      isCamelCase: true,
+      mockConfig: {},
+      ...rest,
+    },
+    openAPI,
+  );
+  serviceGenerator.genFile();
+
+  if (mockFolder) {
+    await mockGenerator({
+      openAPI,
+      mockFolder: mockFolder || "./mocks/",
+      mockConfig: rest.mockConfig || {},
+    });
+  }
 }

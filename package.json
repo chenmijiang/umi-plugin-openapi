@@ -1,7 +1,7 @@
 {
   "name": "umi-plugin-openapi",
   "version": "0.0.1",
-  "description": "",
+  "description": "Umi plugin with a local OpenAPI service and mock generator",
   "keywords": [],
   "homepage": "https://github.com/chenmijiang/umi-plugin-openapi#readme",
   "bugs": {
@@ -32,15 +32,31 @@
     "prepare": "husky"
   },
   "dependencies": {
-    "@umijs/openapi": "^1.14.1",
-    "rimraf": "^6.1.3",
+    "glob": "^13.0.6",
+    "lodash": "^4.18.1",
+    "memoizee": "^0.4.17",
+    "mockjs": "^1.1.0",
+    "number-to-words": "^1.2.5",
+    "nunjucks": "^3.2.4",
+    "openapi3-ts": "^4.6.2",
+    "prettier": "^2.8.8",
+    "reserved-words": "^0.1.2",
     "serve-static": "^2.2.1",
     "swagger-ui-dist": "^5.34.0",
-    "umi": "^4.7.28"
+    "swagger2openapi": "^7.0.8",
+    "tiny-pinyin": "^1.3.2"
   },
   "devDependencies": {
+    "@types/lodash": "^4.17.27",
+    "@types/memoizee": "^0.4.12",
+    "@types/mockjs": "^1.0.10",
     "@types/node": "^26.6.5",
+    "@types/number-to-words": "^1.2.3",
+    "@types/nunjucks": "^3.2.6",
+    "@types/reserved-words": "^0.1.4",
     "@types/serve-static": "^2.2.0",
+    "@types/swagger2openapi": "^7.0.4",
+    "esbuild": "^0.28.2",
     "husky": "^9.1.7",
     "lint-staged": "^17.6.0",
     "oxfmt": "^0.74.0",
@@ -48,7 +64,11 @@
     "oxlint-tsgolint": "^7.0.2005",
     "tsdown": "^0.23.2",
     "typescript": "^7.0.2",
+    "umi": "^4.7.28",
     "vitest": "^5.0.5"
+  },
+  "peerDependencies": {
+    "umi": "^4.7.28"
   },
   "lint-staged": {
     "*.{json,jsonc,json5,md,mdx,yaml,yml,html,css,scss,less}": [

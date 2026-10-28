@@ -9,5 +9,6 @@ export default defineConfig({
   format: ["cjs"],
   fixedExtension: false,
   dts: true,
+  copy: [{ from: "src/templates/*.njk", to: "dist/templates" }],
   exports: true,
 });

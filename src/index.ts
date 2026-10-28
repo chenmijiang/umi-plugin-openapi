@@ -1,26 +1,11 @@
-import { existsSync, mkdirSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 
-import { generateService } from "@umijs/openapi";
-import { rimraf } from "rimraf";
 import serveStatic from "serve-static";
 import { type IApi } from "umi";
 
-import { getSchema } from "./core";
-
-type ConfigItem = {
-  requestLibPath?: string;
-  schemaPath: string;
-  mock?: boolean;
-  projectName?: string;
-  apiPrefix?: Parameters<typeof generateService>[0]["apiPrefix"];
-  namespace?: string;
-  serversPath?: string;
-  nullable?: boolean;
-  dataFields?: string[];
-  isCamelCase?: boolean;
-  hook?: Parameters<typeof generateService>[0]["hook"];
-};
+import { generateService, getSchema } from "./core";
+import type { ConfigItem } from "./core/types";
 
 function winPath(path: string): string {
   const isExtendedLengthPath = path.startsWith("\\\\?\\");
@@ -42,7 +27,9 @@ export default function (api: IApi): void {
           requestLibPath: zod.string().optional().describe("Custom request method import path."),
           schemaPath: zod
             .string()
-            .describe("URL or local file path to a Swagger 2.0 or OpenAPI 3.0 document."),
+            .describe(
+              "URL or local file path to a Swagger 2.0 or OpenAPI 3.0 document, processed by the bundled generator. HTTPS requires a trusted certificate; use NODE_EXTRA_CA_CERTS for an internal CA.",
+            ),
           mock: zod
             .boolean()
             .optional()
@@ -127,7 +114,7 @@ export default function (api: IApi): void {
 
   try {
     if (existsSync(openAPIFilesPath)) {
-      rimraf.sync(openAPIFilesPath);
+      rmSync(openAPIFilesPath, { recursive: true, force: true });
     }
     mkdirSync(join(openAPIFilesPath));
   } catch (error) {
