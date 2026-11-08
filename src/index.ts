@@ -17,7 +17,7 @@ function winPath(path: string): string {
 
 export default function (api: IApi): void {
   api.onStart(() => {
-    console.log("Using openapi Plugin");
+    console.log("[openAPI]: Plugin enabled");
   });
   api.describe({
     key: "openAPI",
@@ -37,7 +37,7 @@ export default function (api: IApi): void {
     }
     mkdirSync(join(openAPIFilesPath));
   } catch (error) {
-    console.log(error);
+    console.log("[openAPI]: Failed to prepare schema directory:", error);
   }
 
   // 增加中间件
@@ -130,7 +130,7 @@ export default App;
       }
       await genOpenAPIFiles(openAPIConfig);
     } catch (error) {
-      console.error(error);
+      console.error("[openAPI]: Failed to write development schemas:", error);
     }
   });
   const genAllFiles = async (openAPIConfig: ConfigItem) => {
@@ -151,7 +151,7 @@ export default App;
       serversPath: serversFolder,
       mockFolder,
     });
-    api.logger.info("[openAPI]: execution complete");
+    api.logger.info("[openAPI]: Generation finished");
   };
   api.registerCommand({
     name: "openapi",

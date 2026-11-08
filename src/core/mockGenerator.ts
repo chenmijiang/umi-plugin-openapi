@@ -1,14 +1,10 @@
-import fs from "fs";
-import { dirname, join } from "path";
-
 import Mock from "mockjs";
 import type { OpenAPIObject, OperationObject } from "openapi3-ts/oas30";
-import pinyin from "tiny-pinyin";
 
 import OpenAPIParserMock, { type MockValue } from "./openAPIParserMock/index";
 import { get, isOperationObject } from "./openAPIParserMock/utils";
 import { GenerateServiceProps } from "./types";
-import { prettierFile, writeFile } from "./util";
+import { writeFile } from "./util";
 
 Mock.Random.extend({
   country() {
@@ -166,25 +162,27 @@ const genMockFiles = (
   mockFunction: string[],
   mockConfig: GenerateServiceProps["mockConfig"],
 ): string => {
-  return prettierFile(`
+  return `
 // @ts-ignore
 ${mockConfig?.msw ? "" : "import { Request, Response } from 'express'"}
 
 
 export default {
 ${mockFunction.join("\n,")}
-    }`)[0];
+    }`;
 };
 export type genMockDataServerConfig = {
   openAPI: OpenAPIObject;
   mockFolder: string;
   mockConfig: GenerateServiceProps["mockConfig"];
+  formatter?: GenerateServiceProps["formatter"];
 };
 
 const mockGenerator = async ({
   openAPI,
   mockFolder,
   mockConfig,
+  formatter,
 }: genMockDataServerConfig): Promise<void> => {
   const openAPParse = new OpenAPIParserMock(openAPI);
   const docs = openAPParse.parser();
@@ -196,14 +194,11 @@ const mockGenerator = async ({
     Object.keys(pathConfig).forEach((method) => {
       const methodConfig: unknown = pathConfig[method as keyof typeof pathConfig];
       if (isOperationObject(methodConfig)) {
-        let conte = (
+        const conte = (
           methodConfig.operationId ||
           methodConfig?.tags?.join("/") ||
           path.replace("/", "").split("/")[1]
         )?.replace(/[^\w^\s^\u4e00-\u9fa5]/gi, "");
-        if (conte && /[\u3220-\uFA29]/.test(conte)) {
-          conte = pinyin.convertToPinyin(conte, "", true);
-        }
         if (!conte) {
           return;
         }
@@ -225,19 +220,26 @@ const mockGenerator = async ({
       }
     });
   });
+  let hasFormattingError = false;
   Object.keys(mockActionsObj).forEach((file) => {
     if (!file || file === "undefined") {
       return;
     }
-    if (file.includes("/")) {
-      const dirName = dirname(join(mockFolder, `${file}.ts`));
-      if (!fs.existsSync(dirName)) {
-        fs.mkdirSync(dirName);
-      }
-    }
-    writeFile(mockFolder, `${file}.ts`, genMockFiles(mockActionsObj[file], mockConfig));
+    const hasError = writeFile(
+      mockFolder,
+      `${file}.ts`,
+      genMockFiles(mockActionsObj[file], mockConfig),
+      formatter,
+    );
+    hasFormattingError = hasError || hasFormattingError;
   });
-  console.log("✅ 生成 mock 文件成功");
+  if (hasFormattingError) {
+    console.warn(
+      "[openAPI]: Mock files generated with formatting errors; unformatted content preserved",
+    );
+  } else {
+    console.log("[openAPI]: Mock files generated");
+  }
 };
 
 export { mockGenerator };

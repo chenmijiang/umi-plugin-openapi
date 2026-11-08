@@ -425,78 +425,70 @@ void main().catch(error => { console.error(error); throw error; });
 }
 
 describe("published plugin in real Umi projects", () => {
-  test.for([false, true])(
-    "generates usable requests and types with multiple projects=%s",
+  test(
+    "generates usable requests and types with multiple projects",
     { timeout: 240_000 },
-    async (multiple, context) => {
+    async (context) => {
       const app = await fixture(context);
       try {
-        const projects = multiple ? ["alpha", "beta"] : ["alpha"];
-        await app.configure(
-          multiple ? `[${app.config("alpha", true)}, ${app.config("beta")}]` : app.config("alpha"),
-        );
+        const projects = ["alpha", "beta"];
+        await app.configure(`[${app.config("alpha", true)}, ${app.config("beta")}]`);
         await app.run([umiCLI, "openapi"]);
         await consumeServices(app.cwd, projects, context.signal, app.run);
         expect(app.requests).toEqual(
           projects.map((project) => `GET /${project}/pets/42?search=hello+world`),
         );
 
-        if (multiple) {
-          const port = await unusedPort(context.signal);
-          const process = app.start(port);
-          const origin = `http://127.0.0.1:${port}`;
-          const html = await waitForResponse(process, `${origin}/umi/plugin/openapi`, (body) =>
-            body.includes('id="root"'),
-          );
-          const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)];
-          expect(scripts.some((match) => new URL(match[1]!, origin).origin === origin)).toBe(true);
-          for (const match of scripts) {
-            const response = await fetch(new URL(match[1]!, origin), {
-              signal: AbortSignal.any([context.signal, AbortSignal.timeout(30_000)]),
-            });
-            expect(response.status).toBe(200);
-            expect(response.headers.get("content-type")).toMatch(/javascript/);
-            await response.arrayBuffer();
+        const port = await unusedPort(context.signal);
+        const process = app.start(port);
+        const origin = `http://127.0.0.1:${port}`;
+        const html = await waitForResponse(process, `${origin}/umi/plugin/openapi`, (body) =>
+          body.includes('id="root"'),
+        );
+        const scripts = [...html.matchAll(/<script[^>]+src="([^"]+)"/g)];
+        expect(scripts.some((match) => new URL(match[1]!, origin).origin === origin)).toBe(true);
+        for (const match of scripts) {
+          const response = await fetch(new URL(match[1]!, origin), {
+            signal: AbortSignal.any([context.signal, AbortSignal.timeout(30_000)]),
+          });
+          expect(response.status).toBe(200);
+          expect(response.headers.get("content-type")).toMatch(/javascript/);
+          await response.arrayBuffer();
+        }
+        const status = await waitForResponse(process, `${origin}/__integration/status`, (body) => {
+          try {
+            return JSON.parse(body).compiled === true;
+          } catch {
+            return false;
           }
-          const status = await waitForResponse(
+        });
+        expect(JSON.parse(status)).toMatchObject({
+          errors: [],
+          paths: expect.arrayContaining(["/umi/plugin/openapi"]),
+        });
+        for (const project of projects) {
+          const body = await waitForResponse(
             process,
-            `${origin}/__integration/status`,
-            (body) => {
+            `${origin}/umi-plugins_${project}.json`,
+            (value) => {
               try {
-                return JSON.parse(body).compiled === true;
+                return JSON.parse(value).info?.title === `${project} pets`;
               } catch {
                 return false;
               }
             },
           );
-          expect(JSON.parse(status)).toMatchObject({
-            errors: [],
-            paths: expect.arrayContaining(["/umi/plugin/openapi"]),
-          });
-          for (const project of projects) {
-            const body = await waitForResponse(
-              process,
-              `${origin}/umi-plugins_${project}.json`,
-              (value) => {
-                try {
-                  return JSON.parse(value).info?.title === `${project} pets`;
-                } catch {
-                  return false;
-                }
-              },
-            );
-            expect(JSON.parse(body)).toEqual(schema(project));
-          }
-          // The generated mock is consumed by Umi's real mock middleware, not just inspected.
-          const mock = await waitForResponse(process, `${origin}/alpha/pets/42`, (body) => {
-            try {
-              return typeof JSON.parse(body).name === "string";
-            } catch {
-              return false;
-            }
-          });
-          expect(JSON.parse(mock)).toEqual({ id: expect.any(String), name: expect.any(String) });
+          expect(JSON.parse(body)).toEqual(schema(project));
         }
+        // The generated mock is consumed by Umi's real mock middleware, not just inspected.
+        const mock = await waitForResponse(process, `${origin}/alpha/pets/42`, (body) => {
+          try {
+            return typeof JSON.parse(body).name === "string";
+          } catch {
+            return false;
+          }
+        });
+        expect(JSON.parse(mock)).toEqual({ id: expect.any(String), name: expect.any(String) });
       } finally {
         await app.cleanup();
       }

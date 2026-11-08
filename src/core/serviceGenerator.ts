@@ -1,7 +1,6 @@
-import fs, { existsSync, readFileSync } from "fs";
+import fs, { existsSync, globSync } from "node:fs";
 import { join } from "path";
 
-import { glob } from "glob";
 import { camelCase } from "lodash";
 import numberToWords from "number-to-words";
 import * as nunjucks from "nunjucks";
@@ -17,11 +16,58 @@ import type {
   ResponsesObject,
   SchemaObject,
 } from "openapi3-ts/oas30";
-import ReservedDict from "reserved-words";
-import pinyin from "tiny-pinyin";
 
 import type { GenerateServiceProps } from "./types";
 import { stripDot, writeFile } from "./util";
+
+const reservedWords = new Set([
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "debugger",
+  "default",
+  "delete",
+  "do",
+  "else",
+  "enum",
+  "export",
+  "extends",
+  "false",
+  "finally",
+  "for",
+  "function",
+  "if",
+  "implements",
+  "import",
+  "in",
+  "instanceof",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "return",
+  "static",
+  "super",
+  "switch",
+  "this",
+  "throw",
+  "true",
+  "try",
+  "typeof",
+  "var",
+  "void",
+  "while",
+  "with",
+  "yield",
+]);
 
 interface LegacySchema {
   $ref?: string;
@@ -37,6 +83,8 @@ interface LegacySchema {
   oneOf?: LegacySchema[];
   anyOf?: LegacySchema[];
   allOf?: LegacySchema[];
+  nullable?: boolean;
+  additionalProperties?: boolean | LegacySchema;
 }
 
 interface TemplateProperty {
@@ -47,6 +95,7 @@ interface TemplateProperty {
   format?: string;
   items?: LegacySchema | LegacySchema[];
   $ref?: string;
+  isType?: boolean;
 }
 
 interface ResolvedSchema {
@@ -62,6 +111,7 @@ interface InterfaceTemplate {
   parent?: unknown;
   props: TemplateProperty[][];
   isEnum?: boolean;
+  nullable?: boolean;
 }
 
 interface BodyTemplate {
@@ -96,8 +146,6 @@ interface TemplateParameter extends Omit<ParameterObject, "schema"> {
   alias?: string;
   $ref?: string;
 }
-
-const BASE_DIRS = ["service", "services"];
 
 export type TypescriptFileType = "interface" | "serviceController" | "serviceIndex";
 
@@ -162,7 +210,7 @@ function getTypeLastName(typeName: string): string {
 
 // 类型声明过滤关键字
 const resolveTypeName = (typeName: string): string => {
-  if (ReservedDict.check(typeName)) {
+  if (reservedWords.has(typeName)) {
     return `__openAPI__${typeName}`;
   }
   const typeLastName = getTypeLastName(typeName);
@@ -171,9 +219,9 @@ const resolveTypeName = (typeName: string): string => {
     .replace(/[-_ ](\w)/g, (_all, letter) => letter.toUpperCase())
     .replace(/[^\w^\s^\u4e00-\u9fa5]/gi, "");
 
-  // 当model名称是number开头的时候，ts会报错。这种场景一般发生在后端定义的名称是中文
+  // 保留纯数字和下划线名称的历史前缀，避免生成非法标识符。
   if (name === "_" || /^\d+$/.test(name)) {
-    console.log("⚠️  models不能以number开头，原因可能是Model定义名称为中文, 建议联系后台修改");
+    console.log(`[openAPI]: Renamed type "${name}" to "Pinyin_${name}" for a valid identifier`);
     return `Pinyin_${name}`;
   }
   // 前面的解析可能会吧类似"2.0"之类的tag文字解析成首字母带数字的key
@@ -184,11 +232,7 @@ const resolveTypeName = (typeName: string): string => {
     name = `${numberToWords.toWords(firstChar)}${name.substring(1)}`;
   }
 
-  if (!/[\u3220-\uFA29]/.test(name) && !/^\d$/.test(name)) {
-    return name;
-  }
-  const noBlankName = name.replace(/ +/g, "");
-  return pinyin.convertToPinyin(noBlankName, "", true);
+  return name.replace(/ +/g, "");
 };
 
 function getRefName(refObject: LegacySchema): string {
@@ -196,8 +240,26 @@ function getRefName(refObject: LegacySchema): string {
   return resolveTypeName(refPaths[refPaths.length - 1]);
 }
 
-const defaultGetType = (input: unknown, namespace: string = ""): string => {
+const escapeComment = (text: string): string =>
+  text.replace(/\*\//g, "*\\/").replace(/\r\n?|\n/g, "\n * ");
+
+const defaultGetType = (
+  input: unknown,
+  namespace: string = "",
+  describe?: (schema: LegacySchema) => string,
+): string => {
+  const schema = input as LegacySchema | undefined;
+  const type = getNonNullableType(input, namespace, describe);
+  return schema?.nullable && type !== "null" ? `${type} | null` : type;
+};
+
+const getNonNullableType = (
+  input: unknown,
+  namespace: string,
+  describe?: (schema: LegacySchema) => string,
+): string => {
   const schemaObject = input as LegacySchema | undefined;
+  const typeOf = (schema: unknown): string => defaultGetType(schema, namespace, describe);
   if (schemaObject === undefined || schemaObject === null) {
     return "any";
   }
@@ -262,13 +324,11 @@ const defaultGetType = (input: unknown, namespace: string = ""): string => {
     }
 
     if (Array.isArray(items)) {
-      const arrayItemType = items
-        .map((subType) => defaultGetType(subType.schema || subType, namespace))
-        .toString();
+      const arrayItemType = items.map((subType) => typeOf(subType.schema || subType)).toString();
       return `[${arrayItemType}]`;
     }
-    const arrayType = defaultGetType(items, namespace);
-    return arrayType.includes(" | ") ? `(${arrayType})[]` : `${arrayType}[]`;
+    const arrayType = typeOf(items);
+    return / [|&] /.test(arrayType) ? `(${arrayType})[]` : `${arrayType}[]`;
   }
 
   if (type === "enum") {
@@ -284,19 +344,27 @@ const defaultGetType = (input: unknown, namespace: string = ""): string => {
   }
 
   if (schemaObject.oneOf && schemaObject.oneOf.length) {
-    return schemaObject.oneOf.map((item) => defaultGetType(item, namespace)).join(" | ");
+    return schemaObject.oneOf.map((item) => typeOf(item)).join(" | ");
   }
   if (schemaObject.anyOf && schemaObject.anyOf.length) {
-    return schemaObject.anyOf.map((item) => defaultGetType(item, namespace)).join(" | ");
+    return schemaObject.anyOf.map((item) => typeOf(item)).join(" | ");
   }
   if (schemaObject.allOf && schemaObject.allOf.length) {
-    return `(${schemaObject.allOf.map((item) => defaultGetType(item, namespace)).join(" & ")})`;
+    return `(${schemaObject.allOf.map((item) => `(${typeOf(item)})`).join(" & ")})`;
   }
-  if (schemaObject.type === "object" || schemaObject.properties) {
+  if (
+    schemaObject.type === "object" ||
+    schemaObject.properties ||
+    schemaObject.additionalProperties !== undefined
+  ) {
+    const additional = schemaObject.additionalProperties;
+    const valueType = additional && typeof additional === "object" ? typeOf(additional) : "unknown";
+    const dictionaryType = valueType === "any" ? "unknown" : valueType;
+    const indexSignature = additional ? `[key: string]: ${dictionaryType}; ` : "";
     if (!Object.keys(schemaObject.properties || {}).length) {
-      return "Record<string, any>";
+      return `Record<string, ${additional === false ? "never" : dictionaryType}>`;
     }
-    return `{ ${Object.keys(schemaObject.properties || {})
+    return `{\n${Object.keys(schemaObject.properties || {})
       .map((key) => {
         let required = false;
         if (typeof schemaObject.required === "boolean" && schemaObject.required) {
@@ -317,52 +385,15 @@ const defaultGetType = (input: unknown, namespace: string = ""): string => {
          * 在后面进行格式化的时候会将正确的字符串转换为正常形式，
          * 错误的继续保留字符串。
          * */
-        return `'${key}'${required ? "" : "?"}: ${defaultGetType(
-          schemaObject.properties && schemaObject.properties[key],
-          namespace,
-        )}; `;
+        const property = schemaObject.properties![key];
+        const description = describe
+          ? describe(property)
+          : escapeComment([property.title, property.description].filter(Boolean).join(" "));
+        return `${description ? `/** ${description} */\n` : ""}${JSON.stringify(key)}${required ? "" : "?"}: ${typeOf(property)};\n`;
       })
-      .join("")}}`;
+      .join("")}${indexSignature}}`;
   }
   return "any";
-};
-
-export const getGenInfo = (
-  isDirExist: boolean,
-  appName: string,
-  absSrcPath: string,
-): [boolean, boolean] => {
-  // dir 不存在，则没有占用，且为第一次
-  if (!isDirExist) {
-    return [false, true];
-  }
-  const indexList = glob.sync(`@(${BASE_DIRS.join("|")})/${appName}/index.@(js|ts)`, {
-    cwd: absSrcPath,
-  });
-  // dir 存在，且 index 存在
-  if (indexList && indexList.length) {
-    const indexFile = join(absSrcPath, indexList[0]);
-    try {
-      const line = (readFileSync(indexFile, "utf-8") || "").split(/\r?\n/).slice(0, 3).join("");
-      // dir 存在，index 存在， 且 index 是我们生成的。则未占用，且不是第一次
-      if (line.includes("// API 更新时间：")) {
-        return [false, false];
-      }
-      // dir 存在，index 存在，且 index 内容不是我们生成的。此时如果 openAPI 子文件存在，就不是第一次，否则是第一次
-      return [true, !existsSync(join(indexFile, "openAPI"))];
-    } catch {
-      // 因为 glob 已经拿到了这个文件，但没权限读，所以当作 dirUsed, 在子目录重新新建，所以当作 firstTime
-      return [true, true];
-    }
-  }
-  // dir 存在，index 不存在, 冲突，第一次要看 dir 下有没有 openAPI 文件夹
-  return [
-    true,
-    !(
-      existsSync(join(absSrcPath, BASE_DIRS[0], appName, "openAPI")) ||
-      existsSync(join(absSrcPath, BASE_DIRS[1], appName, "openAPI"))
-    ),
-  ];
 };
 
 const DEFAULT_SCHEMA: LegacySchema = {
@@ -402,6 +433,8 @@ class ServiceGenerator {
   protected mappings: MappingItemType[] = [];
 
   protected finalPath: string;
+
+  private hasFormattingError = false;
 
   protected config: GenerateServiceProps & { projectName: string; templatesFolder: string };
   protected openAPIData: OpenAPIObject;
@@ -457,18 +490,19 @@ class ServiceGenerator {
   }
 
   public genFile(): void {
+    this.hasFormattingError = false;
     const basePath = this.config.serversPath || "./src/service";
     const finalPath = join(basePath, this.config.projectName);
     this.finalPath = finalPath;
     try {
-      glob
-        .sync(`${finalPath}/**/*`)
-        .filter((ele) => !ele.includes("_deperated"))
-        .forEach((ele) => {
-          fs.rmSync(ele, { recursive: true, force: true });
-        });
+      for (const relativePath of globSync("**/*", { cwd: finalPath })) {
+        const filePath = join(finalPath, relativePath);
+        if (!filePath.includes("_deperated")) {
+          fs.rmSync(filePath, { recursive: true, force: true });
+        }
+      }
     } catch (error) {
-      console.log(`🚥 serves 生成失败: ${String(error)}`);
+      console.log(`[openAPI]: Failed to clean service output directory: ${String(error)}`);
     }
     if (!this.config.splitDeclare) {
       // 生成 ts 类型声明
@@ -491,36 +525,35 @@ class ServiceGenerator {
       this.genTypeFilesByTag();
     }
     // 生成 controller 文件
-    const prettierError: boolean[] = [];
     // 生成 service 统计
     this.getServiceTP().forEach((tp) => {
       // 根据当前数据源类型选择恰当的 controller 模版
       const template = "serviceController";
-      const hasError = this.genFileFromTemplate(
-        this.getFinalFileName(`${tp.className}.ts`),
-        template,
-        {
-          namespace: this.config.namespace,
-          requestOptionsType: this.config.requestOptionsType,
-          requestImportStatement: this.config.requestImportStatement,
-          disableTypeCheck: false,
-          ...tp,
-        },
-      );
-      prettierError.push(hasError);
+      this.genFileFromTemplate(this.getFinalFileName(`${tp.className}.ts`), template, {
+        namespace: this.config.namespace,
+        requestOptionsType: this.config.requestOptionsType,
+        requestImportStatement: this.config.requestImportStatement,
+        disableTypeCheck: false,
+        ...tp,
+      });
     });
 
-    if (prettierError.includes(true)) {
-      console.log(`🚥 格式化失败，请检查 service 文件内可能存在的语法错误`);
-    }
     // 生成 index 文件
     this.genFileFromTemplate(`index.ts`, "serviceIndex", {
-      list: this.classNameList,
+      list: [...this.classNameList].sort((a, b) =>
+        a.fileName < b.fileName ? -1 : a.fileName > b.fileName ? 1 : 0,
+      ),
       disableTypeCheck: false,
     });
 
     // 打印日志
-    console.log(`✅ 成功生成 service 文件`);
+    if (this.hasFormattingError) {
+      console.warn(
+        "[openAPI]: Service files generated with formatting errors; unformatted content preserved",
+      );
+    } else {
+      console.log("[openAPI]: Service files generated");
+    }
   }
 
   public concatOrNull = <T>(...arrays: (T[] | null | undefined)[]): T[] | null => {
@@ -666,13 +699,13 @@ class ServiceGenerator {
                 functionName: this.config.isCamelCase ? camelCase(functionName) : functionName,
                 typeName: this.getTypeName(newApi),
                 path: getPrefixPath(),
-                pathInComment: formattedPath.replace(/\*/g, "&#42;"),
+                pathInComment: escapeComment(formattedPath.replace(/\*/g, "&#42;")),
                 hasPathVariables: formattedPath.includes("{"),
                 hasApiPrefix: !!this.config.apiPrefix,
                 method: newApi.method,
                 // 如果 functionName 和 summary 相同，则不显示 summary
-                desc:
-                  functionName === newApi.summary
+                desc: escapeComment(
+                  (functionName === newApi.summary
                     ? newApi.description
                     : [
                         newApi.summary,
@@ -682,7 +715,8 @@ class ServiceGenerator {
                           : "",
                       ]
                         .filter((s) => s)
-                        .join(" "),
+                        .join(" ")) || "",
+                ),
                 hasHeader: !!(params && params.header) || !!(body && body.mediaType),
                 params: finalParams,
                 hasParams: Boolean(Object.keys(finalParams || {}).length),
@@ -694,7 +728,7 @@ class ServiceGenerator {
               };
             } catch (error) {
               // eslint-disable-next-line no-console
-              console.error("[GenSDK] gen service param error:", error);
+              console.error("[openAPI]: Failed to generate service parameters:", error);
               throw error;
             }
           })
@@ -744,11 +778,8 @@ class ServiceGenerator {
       mediaType = "";
     }
     // 如果 requestBody 有 required 属性，则正常展示；如果没有，默认非必填
-    const required =
-      "required" in requestBody && typeof requestBody.required === "boolean"
-        ? requestBody.required
-        : false;
-    if (schema.type === "object" && schema.properties) {
+    const required = reqBody.required === true;
+    if (schema.type === "object" && schema.properties && !schema.nullable) {
       const propertiesList = Object.keys(schema.properties)
         .map((p) => {
           if (
@@ -767,6 +798,7 @@ class ServiceGenerator {
               schema: {
                 ...schema.properties[p],
                 type: this.getType(schema.properties[p], this.config.namespace),
+                description: this.getDescription(schema.properties[p]),
                 required: Array.isArray(schema.required) ? schema.required.includes(p) : false,
               },
             };
@@ -801,7 +833,10 @@ class ServiceGenerator {
   }
   public resolveFileTP(obj: unknown): FileTemplate[] {
     let ret: FileTemplate[] = [];
-    const result = this.resolveObject(obj);
+    const schema = obj as LegacySchema | undefined;
+    const result = this.resolveObject(
+      schema?.$ref ? this.resolveRefObject<LegacySchema>(schema) : obj,
+    );
     const resolved = typeof result === "string" ? {} : result;
     const props =
       (resolved.props &&
@@ -909,6 +944,7 @@ class ServiceGenerator {
             return {
               ...p,
               isObject: isDirectObject || isRefObject,
+              description: escapeComment(p.description ?? ""),
               type: this.getType(p.schema || DEFAULT_SCHEMA, this.config.namespace),
             };
           });
@@ -952,9 +988,9 @@ class ServiceGenerator {
 
           const getDefinesType = () => {
             if (result.type) {
-              return (defines[typeName] as SchemaObject).type === "object" || result.type;
+              return result.type;
             }
-            return "Record<string, any>";
+            return "Record<string, unknown>";
           };
           return {
             typeName: resolveTypeName(typeName),
@@ -962,6 +998,7 @@ class ServiceGenerator {
             parent: result.parent,
             props: result.props || [],
             isEnum: result.isEnum,
+            nullable: (defines[typeName] as LegacySchema).nullable,
           };
         });
       });
@@ -974,15 +1011,15 @@ class ServiceGenerator {
         if (!operationObject) {
           return;
         }
-        operationObject.parameters = operationObject.parameters?.filter(
-          (item) => (item as ParameterObject)?.in !== "header",
-        );
+        operationObject.parameters = operationObject.parameters
+          ?.map((item) => this.resolveRefObject<ParameterObject>(item))
+          .filter((item) => item.in !== "header");
         const props: TemplateProperty[] = [];
         if (operationObject.parameters) {
           operationObject.parameters.forEach((item) => {
             const parameter = item as ParameterObject;
             props.push({
-              desc: parameter.description ?? "",
+              desc: escapeComment(parameter.description ?? ""),
               name: parameter.name,
               required: parameter.required,
               type: this.getType(parameter.schema),
@@ -992,9 +1029,9 @@ class ServiceGenerator {
         // parameters may be in path
         if (pathItem.parameters) {
           pathItem.parameters.forEach((item) => {
-            const parameter = item as ParameterObject;
+            const parameter = this.resolveRefObject<ParameterObject>(item);
             props.push({
-              desc: parameter.description ?? "",
+              desc: escapeComment(parameter.description ?? ""),
               name: parameter.name,
               required: parameter.required,
               type: this.getType(parameter.schema),
@@ -1010,7 +1047,7 @@ class ServiceGenerator {
                 method,
                 path: p,
               }),
-              type: "Record<string, any>",
+              type: "Record<string, unknown>",
               parent: undefined,
               props: [props],
               isEnum: false,
@@ -1034,23 +1071,29 @@ class ServiceGenerator {
     fileName: string,
     type: TypescriptFileType,
     params: Record<string, unknown>,
-  ): boolean {
+  ): void {
     try {
       const template = this.getTemplate(type);
       // 设置输出不转义
       nunjucks.configure({
         autoescape: false,
       });
-      return writeFile(this.finalPath, fileName, nunjucks.renderString(template, params));
+      const hasError = writeFile(
+        this.finalPath,
+        fileName,
+        nunjucks.renderString(template, params),
+        this.config.formatter,
+      );
+      this.hasFormattingError = hasError || this.hasFormattingError;
     } catch (error) {
       // eslint-disable-next-line no-console
-      console.error("[GenSDK] file gen fail:", fileName, "type:", type);
+      console.error(`[openAPI]: Failed to generate ${fileName} from template "${type}"`);
       throw error;
     }
   }
 
   private getTemplate(type: "interface" | "serviceController" | "serviceIndex"): string {
-    return readFileSync(join(this.config.templatesFolder, `${type}.njk`), "utf8");
+    return fs.readFileSync(join(this.config.templatesFolder, `${type}.njk`), "utf8");
   }
 
   // 获取 TS 类型的属性列表
@@ -1066,7 +1109,7 @@ class ServiceGenerator {
             ...schema,
             name: propName,
             type: this.getType(schema),
-            desc: [schema.title, schema.description].filter((s) => s).join(" "),
+            desc: this.getDescription(schema),
             // 如果没有 required 信息，默认全部是非必填
             required: Array.isArray(requiredPropKeys)
               ? requiredPropKeys.some((key) => key === propName)
@@ -1084,43 +1127,59 @@ class ServiceGenerator {
         return type;
       }
     }
-    return defaultGetType(schemaObject, namespace);
+    return defaultGetType(schemaObject, namespace, (schema) => this.getDescription(schema));
+  }
+
+  private getDescription(schema: LegacySchema): string {
+    const seen = new Set<string>();
+    let current = schema;
+    while (!current.title && !current.description && current.$ref && !seen.has(current.$ref)) {
+      seen.add(current.$ref);
+      const path = current.$ref.split("/");
+      if (path.shift() !== "#") break;
+      let resolved: unknown = this.openAPIData;
+      for (const key of path) {
+        resolved = (resolved as Record<string, unknown> | undefined)?.[
+          key.replace(/~1/g, "/").replace(/~0/g, "~")
+        ];
+      }
+      if (!resolved || typeof resolved !== "object") break;
+      current = resolved as LegacySchema;
+    }
+    return escapeComment([current.title, current.description].filter(Boolean).join(" "));
   }
 
   resolveObject(input: unknown): ResolvedSchema | string {
+    if (typeof input === "string") return input;
     const schemaObject = (input ?? {}) as LegacySchema;
     // 引用类型
     if (schemaObject.$ref) {
-      return this.resolveRefObject<ResolvedSchema>(schemaObject);
+      return { type: this.getType(schemaObject) };
     }
     // 枚举类型
     if (schemaObject.enum) {
       return this.resolveEnumObject(schemaObject);
+    }
+    if (schemaObject.oneOf?.length || schemaObject.anyOf?.length) {
+      return { type: this.getType(schemaObject) };
     }
     // 继承类型
     if (schemaObject.allOf && schemaObject.allOf.length) {
       return this.resolveAllOfObject(schemaObject);
     }
     // 对象类型
-    if (schemaObject.properties) {
+    if (schemaObject.properties && Object.keys(schemaObject.properties).length) {
       return this.resolveProperties(schemaObject);
     }
     // 数组类型
     if (schemaObject.items && schemaObject.type === "array") {
       return this.resolveArray(schemaObject);
     }
-    return schemaObject;
+    return { type: this.getType(schemaObject) };
   }
 
   resolveArray(schemaObject: LegacySchema): ResolvedSchema | string {
-    if (schemaObject.items && !Array.isArray(schemaObject.items) && schemaObject.items.$ref) {
-      const refObj = schemaObject.items.$ref.split("/");
-      return {
-        type: `${refObj[refObj.length - 1]}[]`,
-      };
-    }
-    // TODO: 这里需要解析出具体属性，但由于 parser 层还不确定，所以暂时先返回 any
-    return "any[]";
+    return { type: this.getType(schemaObject) };
   }
 
   resolveProperties(schemaObject: LegacySchema): ResolvedSchema {
@@ -1145,6 +1204,7 @@ class ServiceGenerator {
             ),
           ),
         ).join(" | ");
+        if (schemaObject.nullable) enumStr += " | null";
         break;
       default:
         break;
@@ -1157,9 +1217,13 @@ class ServiceGenerator {
   }
 
   resolveAllOfObject(schemaObject: LegacySchema): ResolvedSchema {
-    const props = (schemaObject.allOf || []).map((item) =>
-      item.$ref ? [{ ...item, type: this.getType(item).split("/").pop() }] : this.getProps(item),
-    );
+    const props = (schemaObject.allOf || []).map((item) => {
+      if (!item.$ref && !item.nullable && !item.oneOf && !item.anyOf && !item.allOf) {
+        return this.getProps(item);
+      }
+      const type = this.getType(item);
+      return [{ ...item, isType: true, type: type.includes(" | ") ? `(${type})` : type }];
+    });
 
     if (schemaObject.properties) {
       const extProps = this.getProps(schemaObject);
@@ -1260,8 +1324,12 @@ class ServiceGenerator {
   }
 
   private resolveFunctionName(functionName: string, methodName: string): string {
-    // 类型声明过滤关键字
-    if (ReservedDict.check(functionName)) {
+    // async 函数名还需要避开严格模式禁止的绑定名称。
+    if (
+      reservedWords.has(functionName) ||
+      functionName === "eval" ||
+      functionName === "arguments"
+    ) {
       return `${functionName}Using${methodName.toUpperCase()}`;
     }
     return functionName;
@@ -1293,6 +1361,7 @@ class ServiceGenerator {
               parent: result.parent,
               props: result.props || [],
               isEnum: result.isEnum,
+              nullable: (schema as LegacySchema).nullable,
             });
           }
         });
@@ -1306,6 +1375,7 @@ class ServiceGenerator {
             parent: result.parent,
             props: result.props || [],
             isEnum: result.isEnum,
+            nullable: (schema as LegacySchema).nullable,
           });
         }
       }
@@ -1323,9 +1393,9 @@ class ServiceGenerator {
             const props: TemplateProperty[] = [];
             if (api.parameters) {
               api.parameters.forEach((item) => {
-                const parameter = item as ParameterObject;
+                const parameter = this.resolveRefObject<ParameterObject>(item);
                 props.push({
-                  desc: parameter.description ?? "",
+                  desc: escapeComment(parameter.description ?? ""),
                   name: parameter.name,
                   required: parameter.required,
                   type: this.getType(parameter.schema),
@@ -1340,7 +1410,7 @@ class ServiceGenerator {
                   method: api.method,
                   path: api.path,
                 }),
-                type: "Record<string, any>",
+                type: "Record<string, unknown>",
                 parent: undefined,
                 props: [props],
                 isEnum: false,
@@ -1410,9 +1480,9 @@ class ServiceGenerator {
   }
   private getDefinesType(result: ResolvedSchema): string | boolean | LegacySchema {
     if (result.type) {
-      return result.type === "object" || result.type;
+      return result.type;
     }
-    return "Record<string, any>";
+    return "Record<string, unknown>";
   }
 }
 

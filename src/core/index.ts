@@ -15,7 +15,7 @@ export async function getSchema(schemaPath: string, authorization?: string): Pro
       }).then((rest) => rest.json());
       return json;
     } catch (error) {
-      console.log("fetch openapi error:", error);
+      console.log(`[openAPI]: Failed to fetch schema from ${schemaPath}:`, error);
     }
     return null;
   }
@@ -62,7 +62,7 @@ async function getOpenAPIConfig(
     schema as Parameters<typeof converter.convertObj>[0],
     {},
   );
-  console.log("[openAPI]: 💺 将 Swagger 转化为 openAPI");
+  console.log("[openAPI]: Converted Swagger 2.0 to OpenAPI 3.0");
   // Both libraries describe OpenAPI 3.0; openapi3-ts also declares extension index signatures.
   const openAPI = options.openapi as unknown as OpenAPIObject;
   return openAPI;
@@ -74,7 +74,7 @@ export async function generateService({
   schemaPath,
   mockFolder,
   nullable = false,
-  requestOptionsType = "{[key: string]: any}",
+  requestOptionsType = "Record<string, unknown>",
   ...rest
 }: Omit<GenerateServiceProps, "schemaPath"> & { schemaPath: string }): Promise<void> {
   const openAPI = await getOpenAPIConfig(schemaPath, authorization);
@@ -100,6 +100,7 @@ export async function generateService({
       openAPI,
       mockFolder: mockFolder || "./mocks/",
       mockConfig: rest.mockConfig || {},
+      formatter: rest.formatter,
     });
   }
 }

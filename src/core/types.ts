@@ -3,6 +3,13 @@ import type { OpenAPIObject, OperationObject, SchemaObject } from "openapi3-ts/o
 import type { APIDataType } from "./serviceGenerator";
 
 export type GenerateServiceProps = {
+  /** Generated file formatter; defaults to auto (oxfmt when detected, otherwise Prettier). */
+  formatter?:
+    | "oxfmt"
+    | "prettier"
+    | "auto"
+    | "none"
+    | { external: { command: string; arguments: string[] } };
   requestLibPath?: string;
   requestOptionsType?: string;
   requestImportStatement?: string;
@@ -74,14 +81,14 @@ export type GenerateServiceProps = {
      * function customFileNames(operationObject,apiPath){
      *   const operationId=operationObject.operationId;
      *   if (!operationId) {
-     *      console.warn('[Warning] no operationId', apiPath);
+     *      console.warn('[openAPI]: Missing operationId:', apiPath);
      *      return;
      *    }
      *    const res = operationId.split('_');
      *    if (res.length > 1) {
      *      res.shift();
      *      if (res.length > 2) {
-     *        console.warn('[Warning]  operationId has more than 2 part', apiPath);
+     *        console.warn('[openAPI]: operationId has more than two parts after removing the prefix:', apiPath);
      *      }
      *      return [res.join('_')];
      *    } else {

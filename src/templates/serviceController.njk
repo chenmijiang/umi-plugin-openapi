@@ -1,5 +1,3 @@
-// @ts-ignore
-/* eslint-disable */
 {{ requestImportStatement }}
 
 {% for api in list -%}
@@ -30,6 +28,7 @@ export async function {{ api.functionName }}(
 {%- endif -%}
 {%- if api.body -%}
   body
+  {{- "?" if not api.body.required -}}
   {%- if genType === "ts" -%}
   : {% if api.body.propertiesList %}{
     {%- for prop in api.body.propertiesList %}
@@ -79,7 +78,7 @@ export async function {{ api.functionName }}(
   {% endfor %}
   {%- endif -%}
   {% if api.body %}
-  Object.keys(body).forEach(ele => {
+  Object.keys(body || {}).forEach(ele => {
     {% if genType === "ts" %}
     const item = (body as any)[ele];
     {% else %}

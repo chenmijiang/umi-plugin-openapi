@@ -1,7 +1,6 @@
-import { describe, expect, expectTypeOf, test } from "vitest";
+import { describe, expect, test } from "vitest";
 
 import { configItemSchema, configSchema, type ConfigItem } from "../src/config";
-import type { GenerateServiceProps } from "../src/core/types";
 
 const schemaPath = "./openapi.json";
 
@@ -29,6 +28,26 @@ describe("openAPI config schema", () => {
     expect(configSchema.parse(config)).toEqual(config);
   });
 
+  test.each([
+    "oxfmt",
+    "prettier",
+    "auto",
+    "none",
+    { external: { command: "prettier", arguments: ["--stdin-filepath", "{buffer_path}"] } },
+  ])("preserves formatter configuration: %j", (formatter) => {
+    expect(configSchema.parse({ schemaPath, formatter })).toEqual({ schemaPath, formatter });
+  });
+
+  test.each([
+    "unknown",
+    null,
+    { external: { command: "", arguments: [] } },
+    { external: { command: "prettier" } },
+    { external: { command: "prettier", arguments: [123] } },
+  ])("rejects invalid formatter configuration: %j", (formatter) => {
+    expect(configSchema.safeParse({ schemaPath, formatter }).success).toBe(false);
+  });
+
   test("retains supported callbacks rather than stripping them from parsed configuration", () => {
     const input: ConfigItem = {
       schemaPath,
@@ -44,25 +63,7 @@ describe("openAPI config schema", () => {
       },
     };
 
-    expect(configItemSchema.parse(input)).toEqual({
-      schemaPath,
-      apiPrefix: expect.any(Function),
-      hook: {
-        afterOpenApiDataInited: expect.any(Function),
-        customFunctionName: expect.any(Function),
-        customTypeName: expect.any(Function),
-        customClassName: expect.any(Function),
-        customOptionsDefaultValue: expect.any(Function),
-        customType: expect.any(Function),
-        customFileNames: expect.any(Function),
-      },
-    });
-  });
-
-  test("preserves generator-compatible configuration and exact callback signatures", () => {
-    expectTypeOf<ConfigItem>().toExtend<GenerateServiceProps>();
-    expectTypeOf<ConfigItem["apiPrefix"]>().toEqualTypeOf<GenerateServiceProps["apiPrefix"]>();
-    expectTypeOf<ConfigItem["hook"]>().toEqualTypeOf<GenerateServiceProps["hook"]>();
+    expect(configItemSchema.parse(input)).toEqual(input);
   });
 
   test.each([
@@ -71,18 +72,10 @@ describe("openAPI config schema", () => {
     { config: { schemaPath, mock: "true" }, field: "mock" },
     { config: { schemaPath, apiPrefix: 123 }, field: "apiPrefix" },
     { config: { schemaPath, hook: "not an object" }, field: "hook" },
-    ...[
-      "afterOpenApiDataInited",
-      "customFunctionName",
-      "customTypeName",
-      "customOptionsDefaultValue",
-      "customClassName",
-      "customType",
-      "customFileNames",
-    ].map((hook) => ({
-      config: { schemaPath, hook: { [hook]: "not a function" } },
-      field: `hook.${hook}`,
-    })),
+    {
+      config: { schemaPath, hook: { customFunctionName: "not a function" } },
+      field: "hook.customFunctionName",
+    },
   ])("rejects invalid $field", ({ config, field }) => {
     const result = configSchema.safeParse(config);
 

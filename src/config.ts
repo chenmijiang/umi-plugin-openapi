@@ -4,6 +4,20 @@ import type { GenerateServiceProps } from "./core/types";
 
 export const configItemSchema = z.object({
   requestLibPath: z.string().optional().describe("Custom request method import path."),
+  formatter: z
+    .union([
+      z.enum(["oxfmt", "prettier", "auto", "none"]),
+      z.object({
+        external: z.object({
+          command: z.string().min(1),
+          arguments: z.array(z.string()),
+        }),
+      }),
+    ])
+    .optional()
+    .describe(
+      "Format generated service and mock files. Defaults to auto: prefer project oxfmt dependencies/configuration, otherwise use Prettier. External commands read stdin and return stdout; {buffer_path} is the absolute output file path.",
+    ),
   schemaPath: z
     .string()
     .describe(
