@@ -1,11 +1,16 @@
 import type {
   ExampleObject,
   OpenAPIObject,
-  ParameterObject,
   ReferenceObject,
   SchemaObject,
 } from "openapi3-ts/oas30";
 
+import {
+  httpMethods,
+  isOperationObject,
+  normalizeOperations,
+  resolveLocalRef,
+} from "../operations";
 import primitives from "./primitives";
 import * as utils from "./utils";
 
@@ -135,7 +140,7 @@ class OpenAPIGeneratorMockJs {
   ): MockValue => {
     if (!schema) return undefined;
     const schemaRef = "$ref" in schema ? schema.$ref : undefined;
-    const localSchema = utils.resolveLocalRef(this.openAPI, schema) as SchemaObject;
+    const localSchema = resolveLocalRef(this.openAPI, schema) as SchemaObject;
     if (localSchema.example !== undefined) return localSchema.example as MockValue;
     if (localSchema.default !== undefined) return localSchema.default as MockValue;
     if (localSchema.enum?.length) return localSchema.enum[0] as MockValue;
@@ -160,7 +165,7 @@ class OpenAPIGeneratorMockJs {
         ...requiredNames,
         ...(localSchema.required || []),
         ...allOf.flatMap(
-          (item) => (utils.resolveLocalRef(this.openAPI, item) as SchemaObject).required || [],
+          (item) => (resolveLocalRef(this.openAPI, item) as SchemaObject).required || [],
         ),
       ]);
       const samples = allOf.map((item) =>
@@ -205,7 +210,7 @@ class OpenAPIGeneratorMockJs {
     if (type === "object") {
       const obj: MockObject = Object.create(null);
       for (const [name, property] of Object.entries(properties || {})) {
-        const resolved = utils.resolveLocalRef(this.openAPI, property) as SchemaObject;
+        const resolved = resolveLocalRef(this.openAPI, property) as SchemaObject;
         // writeOnly applies to requests, even when the name occurs in required.
         if (resolved.writeOnly) continue;
         try {
@@ -245,31 +250,17 @@ class OpenAPIGeneratorMockJs {
   };
 
   parser = (): OpenAPIObject => {
-    // Sampling must not attach examples to the document used by service generation.
-    const openAPI = JSON.parse(JSON.stringify(this.openAPI)) as OpenAPIObject;
+    const openAPI = normalizeOperations(this.openAPI);
     for (const path of Object.keys(openAPI.paths).filter((key) => key.startsWith("/"))) {
-      const pathConfig = utils.resolveLocalRef(this.openAPI, openAPI.paths[path]);
+      const pathConfig = openAPI.paths[path];
       openAPI.paths[path] = { ...pathConfig };
-      for (const method of utils.httpMethods) {
+      for (const method of httpMethods) {
         const original = pathConfig[method];
-        if (!utils.isOperationObject(original)) continue;
+        if (!isOperationObject(original)) continue;
         const api = { ...original, responses: { ...original.responses } };
         openAPI.paths[path][method] = api;
-        const inherited = (pathConfig.parameters || []).map(
-          (parameter) => utils.resolveLocalRef(this.openAPI, parameter) as ParameterObject,
-        );
-        const own = (api.parameters || []).map(
-          (parameter) => utils.resolveLocalRef(this.openAPI, parameter) as ParameterObject,
-        );
-        api.parameters = [
-          ...inherited.filter(
-            (parameter) =>
-              !own.some((item) => item.name === parameter.name && item.in === parameter.in),
-          ),
-          ...own,
-        ];
         const { code } = utils.selectResponse(api.responses);
-        const response = { ...utils.resolveLocalRef(this.openAPI, api.responses[code]) };
+        const response = { ...resolveLocalRef(this.openAPI, api.responses[code]) };
         api.responses[code] = response;
         const content = response.content || {};
         const keys = Object.keys(content);
@@ -288,7 +279,7 @@ class OpenAPIGeneratorMockJs {
         } else if (media.examples && Object.keys(media.examples).length) {
           const candidate = Object.values(media.examples)[0];
           if (!utils.isObject(candidate)) throw new Error("[openAPI mock]: Invalid media example");
-          const first = utils.resolveLocalRef(this.openAPI, candidate) as ExampleObject;
+          const first = resolveLocalRef(this.openAPI, candidate) as ExampleObject;
           if (first.externalValue)
             throw new Error(
               "[openAPI mock]: externalValue examples are not fetched; provide a value",

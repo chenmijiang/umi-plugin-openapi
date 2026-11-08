@@ -184,25 +184,55 @@ test("response refs decode JSON pointers, compose properties, and prefer wildcar
   expect(invoke(actions["GET /fallback"])).toEqual({ status: 500, payload: "error" });
 });
 
-test("MSW keeps primitive media examples rather than replacing them with objects", async ({
-  onTestFinished,
-}) => {
-  const options = await fixture(onTestFinished, {
-    "/false": {
-      get: {
-        operationId: "falseExample",
-        responses: {
-          "200": {
-            description: "false",
-            content: { "application/json": { example: false, schema: { type: "boolean" } } },
+for (const msw of [false, true]) {
+  test(`explicit media samples override unsamplable schemas and retain primitives (MSW: ${msw})`, async ({
+    onTestFinished,
+  }) => {
+    const options = await fixture(
+      onTestFinished,
+      {
+        "/false": {
+          get: {
+            operationId: "falseExample",
+            responses: {
+              "200": {
+                description: "false",
+                content: {
+                  "application/json": { example: false, schema: { not: { type: "string" } } },
+                },
+              },
+            },
+          },
+        },
+        "/zero": {
+          get: {
+            operationId: "referencedExample",
+            responses: {
+              "200": {
+                description: "zero",
+                content: {
+                  "application/json": {
+                    examples: { zero: { $ref: "#/components/examples/Zero" } },
+                    schema: { not: { type: "string" } },
+                  },
+                },
+              },
+            },
           },
         },
       },
-    },
+      { examples: { Zero: { value: 0 } } },
+    );
+    await generateService({ ...options, mockConfig: { msw } });
+    const actions = await loadMocks(options.mockFolder);
+    for (const [route, payload] of [
+      ["/false", false],
+      ["/zero", 0],
+    ] as const) {
+      expect(msw ? actions[`GET ${route}`] : invoke(actions[`GET ${route}`]).payload).toBe(payload);
+    }
   });
-  await generateService({ ...options, mockConfig: { msw: true } });
-  expect((await loadMocks(options.mockFolder))["GET /false"]).toBe(false);
-});
+}
 
 for (const ref of ["#/components/schemas/Missing", "#/components/schemas/Loop"]) {
   test(`unresolvable or required cyclic schema ${ref} fails explicitly`, async ({
@@ -229,7 +259,7 @@ for (const ref of ["#/components/schemas/Missing", "#/components/schemas/Loop"])
   });
 }
 
-test("finite recursive responses omit optional links, allow nullable required links, and empty recursive arrays", async ({
+test("recursive responses terminate through optional links, nullability, arrays, or a finite alternative", async ({
   onTestFinished,
 }) => {
   const schemas = {
@@ -247,6 +277,9 @@ test("finite recursive responses omit optional links, allow nullable required li
       properties: { next: { $ref: "#/components/schemas/Nullable" } },
     },
     Array: { type: "array", items: { $ref: "#/components/schemas/Array" } },
+    Alternative: {
+      anyOf: [{ $ref: "#/components/schemas/Alternative" }, { type: "integer", enum: [0] }],
+    },
   };
   const paths = Object.fromEntries(
     Object.keys(schemas).map((name) => [
@@ -265,22 +298,47 @@ test("finite recursive responses omit optional links, allow nullable required li
   expect(invoke(actions["GET /Optional"])).toEqual({ status: 200, payload: { value: 7 } });
   expect(invoke(actions["GET /Nullable"])).toEqual({ status: 200, payload: { next: null } });
   expect(invoke(actions["GET /Array"])).toEqual({ status: 200, payload: [[]] });
+  expect(invoke(actions["GET /Alternative"])).toEqual({ status: 200, payload: 0 });
 });
 
-test("non-200 success codes keep their actual status and beat default errors", async ({
+test("explicit responses preserve successful status boundaries and declared errors instead of default", async ({
   onTestFinished,
 }) => {
-  const statuses = [202, 206, 299];
+  const cases = [
+    {
+      name: "success",
+      responses: {
+        "206": response({ type: "integer", example: 206 }),
+        "2XX": response({ type: "integer", example: 299 }),
+        default: response({ type: "integer", example: 500 }),
+      },
+      status: 206,
+    },
+    {
+      name: "lastSuccess",
+      responses: {
+        "299": response({ type: "integer", example: 299 }),
+        "400": response({ type: "integer", example: 400 }),
+        default: response({ type: "integer", example: 500 }),
+      },
+      status: 299,
+    },
+    {
+      name: "declaredError",
+      responses: {
+        "404": response({ type: "integer", example: 404 }),
+        default: response({ type: "integer", example: 500 }),
+      },
+      status: 404,
+    },
+  ];
   const paths = Object.fromEntries(
-    statuses.map((status) => [
-      `/status${status}`,
+    cases.map(({ name, responses }) => [
+      `/${name}`,
       {
         get: {
-          operationId: `status${status}`,
-          responses: {
-            default: response({ type: "string", example: "failure" }),
-            [status]: response({ type: "integer", example: status }),
-          },
+          operationId: name,
+          responses,
         },
       },
     ]),
@@ -288,8 +346,8 @@ test("non-200 success codes keep their actual status and beat default errors", a
   const options = await fixture(onTestFinished, paths);
   await generateService(options);
   const actions = await loadMocks(options.mockFolder);
-  for (const status of statuses)
-    expect(invoke(actions[`GET /status${status}`])).toEqual({ status, payload: status });
+  for (const { name, status } of cases)
+    expect(invoke(actions[`GET /${name}`])).toEqual({ status, payload: status });
 });
 
 test("paths extensions and unsampled error responses do not prevent successful mocks", async ({
@@ -413,5 +471,105 @@ for (const msw of [false, true]) {
     ) as Record<string, unknown>;
     expect(Object.hasOwn(sampled, "__proto__")).toBe(true);
     expect(sampled.__proto__).toEqual({ marker: "sampled" });
+  });
+}
+
+for (const mutation of [
+  "in-place",
+  "replacement",
+  "nested operation",
+  "prototype method",
+  "non-enumerable initializer",
+] as const) {
+  test(`client hooks with ${mutation} changes leave mock routes and samples unchanged`, async ({
+    onTestFinished,
+  }) => {
+    const options = await fixture(onTestFinished, {
+      "/baseline": {
+        get: {
+          tags: ["boundary"],
+          operationId: "baseline",
+          responses: { "200": response({ type: "string", example: "baseline sample" }) },
+        },
+      },
+    });
+    type ClientHook = NonNullable<Parameters<typeof generateService>[0]["hook"]>;
+    const nestedOperation = mutation === "nested operation" || mutation === "prototype method";
+    let hook: ClientHook;
+    if (nestedOperation) {
+      class ClientHooks {
+        customFunctionName(
+          this: void,
+          operation: Parameters<NonNullable<ClientHook["customFunctionName"]>>[0],
+        ) {
+          operation.responses["200"] = response({ type: "string", example: "client sample" });
+          return "clientOnly";
+        }
+      }
+      const clientHooks = new ClientHooks();
+      hook =
+        mutation === "prototype method"
+          ? clientHooks
+          : { customFunctionName: clientHooks.customFunctionName };
+    } else {
+      hook = {
+        afterOpenApiDataInited(document) {
+          const client = mutation === "replacement" ? structuredClone(document) : document;
+          client.paths = {
+            "/client-only": {
+              get: {
+                tags: ["boundary"],
+                operationId: "clientOnly",
+                responses: {
+                  "200": {
+                    description: "client sample",
+                    content: {
+                      "application/json": {
+                        schema: { type: "string", example: "client sample" },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          };
+          return mutation === "replacement" ? client : undefined;
+        },
+      };
+      if (mutation === "non-enumerable initializer") {
+        Object.defineProperty(hook, "afterOpenApiDataInited", { enumerable: false });
+      }
+    }
+    await generateService({ ...options, hook });
+    const actions = await loadMocks(options.mockFolder);
+    expect(Object.keys(actions)).toEqual(["GET /baseline"]);
+    expect(invoke(actions["GET /baseline"])).toEqual({ status: 200, payload: "baseline sample" });
+
+    const serviceDirectory = join(options.serversPath, "api");
+    const requests: string[] = [];
+    const { code } = await transform(
+      await readFile(join(serviceDirectory, "boundary.ts"), "utf8"),
+      {
+        loader: "ts",
+        format: "cjs",
+        target: "es2022",
+      },
+    );
+    const module = { exports: {} as { clientOnly: () => Promise<unknown>; baseline?: unknown } };
+    runInNewContext(code, {
+      module,
+      exports: module.exports,
+      require: (specifier: string) => {
+        if (specifier !== "umi") throw new Error(`Unexpected client dependency: ${specifier}`);
+        return {
+          request: (url: string) => {
+            requests.push(url);
+          },
+        };
+      },
+    });
+    expect(module.exports.baseline).toBeUndefined();
+    await module.exports.clientOnly();
+    expect(requests).toEqual([nestedOperation ? "/baseline" : "/client-only"]);
   });
 }

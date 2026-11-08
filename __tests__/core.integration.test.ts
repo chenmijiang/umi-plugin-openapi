@@ -58,16 +58,13 @@ describe("published core schema loading", () => {
     const sourceDirectory = join(directory, "source");
     const linkedDirectory = join(directory, "linked");
     const schemaPath = join(linkedDirectory, "schema.json");
-    let resolvedSchemaPath: string | undefined;
     onTestFinished(async () => {
-      if (resolvedSchemaPath) delete require.cache[resolvedSchemaPath];
       await rm(directory, { recursive: true, force: true });
     });
 
     await mkdir(sourceDirectory);
     await symlink(sourceDirectory, linkedDirectory, "junction");
     await writeFile(schemaPath, JSON.stringify(schema));
-    resolvedSchemaPath = require.resolve(schemaPath);
     await expect(getSchema(schemaPath)).resolves.toEqual(schema);
 
     const updatedSchema = { ...schema, info: { ...schema.info, version: "2.0.0" } };
@@ -151,7 +148,6 @@ async function generationFixture(onTestFinished: TestContext["onTestFinished"], 
   const directory = await mkdtemp(join(tmpdir(), "openapi-generate-"));
   const schemaPath = join(directory, "schema.json");
   onTestFinished(async () => {
-    delete require.cache[schemaPath];
     await rm(directory, { recursive: true, force: true });
   });
   await writeFile(schemaPath, JSON.stringify(document));
@@ -767,6 +763,19 @@ describe("published core service generation", () => {
       },
     );
     expect(responses).toEqual([{ status: 200, body: { 编号: "记录七" } }]);
+    await compileGeneratedConsumer(
+      join(config.serversPath, "api"),
+      `import { 查询资料 } from "./中文服务";
+      const model: API.中文模型 = { 编号: "记录七" };
+      const response: Promise<API.中文模型> = 查询资料({ id: model.编号 });
+      // @ts-expect-error Chinese model properties retain their declared type
+      const invalidModel: API.中文模型 = { 编号: 7 };
+      查询资料({ id: "记录七" }).then((record) => {
+        const id: string = record.编号;
+        // @ts-expect-error Chinese response models are typed, not any
+        const invalidId: number = record.编号;
+      });`,
+    );
   });
 
   for (const splitDeclare of [false, true]) {
@@ -1315,7 +1324,12 @@ test("non-JSON media accepts serialized payloads and requests text decoding", as
   });
   await compileGeneratedConsumer(
     outputPath,
-    `import { sendXml } from './media'; const text: Promise<string> = sendXml('<value>text</value>');\n// @ts-expect-error XML must be serialized by the caller, not sent as a JSON object\nsendXml({ value: 'text' });`,
+    `import { sendXml } from './media';
+    const text: Promise<string> = sendXml('<value>text</value>');
+    // @ts-expect-error text decoding must not expose an untyped or numeric response
+    const invalidResponse: Promise<number> = sendXml('<value>text</value>');
+    // @ts-expect-error XML must be serialized by the caller, not sent as a JSON object
+    sendXml({ value: 'text' });`,
   );
 });
 

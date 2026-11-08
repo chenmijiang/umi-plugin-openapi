@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, mkdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -21,7 +21,7 @@ function schema(project: string) {
     paths: {
       [`/${project}/pets/{id}`]: {
         get: {
-          operationId: "fetchPet",
+          operationId: `${project}FetchPet`,
           tags: ["pets"],
           parameters: [
             { name: "id", in: "path", required: true, schema: { type: "string" } },
@@ -179,15 +179,25 @@ async function run(
   }
 }
 
-async function fixture(context: TestContext, sourceDirectory = "src") {
+async function fixture(
+  context: TestContext,
+  sourceDirectory = "src",
+  operationIds: Record<string, string> = {},
+) {
   context.signal.throwIfAborted();
   const cwd = await mkdtemp(join(tmpdir(), "umi-openapi-plugin-"));
   const requests: string[] = [];
+  const schemaRequests: string[] = [];
   const server = createServer((request, response) => {
     const url = new URL(request.url!, "http://localhost");
     response.setHeader("Content-Type", "application/json");
     if (url.pathname === "/alpha.json" || url.pathname === "/beta.json") {
-      response.end(JSON.stringify(schema(url.pathname.slice(1, -5))));
+      schemaRequests.push(url.pathname);
+      const project = url.pathname.slice(1, -5);
+      const document = schema(project);
+      if (operationIds[project] !== undefined)
+        document.paths[`/${project}/pets/{id}`]!.get.operationId = operationIds[project];
+      response.end(JSON.stringify(document));
     } else if (/^\/(alpha|beta)\/pets\/42$/.test(url.pathname)) {
       requests.push(`${request.method} ${url.pathname}${url.search}`);
       response.end(JSON.stringify({ id: "42", name: url.pathname.split("/")[1] }));
@@ -293,6 +303,7 @@ module.exports = (api) => {
     return {
       cwd,
       requests,
+      schemaRequests,
       cleanup,
       run: (args: string[], success = true) => run(cwd, args, signal, processes, success),
       async configure(value: string) {
@@ -432,7 +443,7 @@ describe("published plugin in real Umi projects", () => {
       const app = await fixture(context);
       try {
         const projects = ["alpha", "beta"];
-        await app.configure(`[${app.config("alpha", true)}, ${app.config("beta")}]`);
+        await app.configure(`[${app.config("alpha", true)}, ${app.config("beta", true)}]`);
         await app.run([umiCLI, "openapi"]);
         await consumeServices(app.cwd, projects, context.signal, app.run);
         expect(app.requests).toEqual(
@@ -481,14 +492,16 @@ describe("published plugin in real Umi projects", () => {
           expect(JSON.parse(body)).toEqual(schema(project));
         }
         // The generated mock is consumed by Umi's real mock middleware, not just inspected.
-        const mock = await waitForResponse(process, `${origin}/alpha/pets/42`, (body) => {
-          try {
-            return typeof JSON.parse(body).name === "string";
-          } catch {
-            return false;
-          }
-        });
-        expect(JSON.parse(mock)).toEqual({ id: expect.any(String), name: expect.any(String) });
+        for (const project of projects) {
+          const mock = await waitForResponse(process, `${origin}/${project}/pets/42`, (body) => {
+            try {
+              return typeof JSON.parse(body).name === "string";
+            } catch {
+              return false;
+            }
+          });
+          expect(JSON.parse(mock)).toEqual({ id: expect.any(String), name: expect.any(String) });
+        }
       } finally {
         await app.cleanup();
       }
@@ -508,11 +521,99 @@ describe("published plugin in real Umi projects", () => {
     }
   }, 240_000);
 
+  for (const { name, projects } of [
+    { name: "duplicate package-name defaults", projects: [undefined, undefined] },
+    { name: "default and explicit package-name targets", projects: [undefined, "integration-app"] },
+    { name: "equivalent normalized paths", projects: ["alpha", "nested/../alpha"] },
+    { name: "case-insensitive aliases", projects: ["Alpha", "alpha"] },
+    { name: "Unicode normalization aliases", projects: ["caf\u00e9", "cafe\u0301"] },
+    { name: "parent before child", projects: ["alpha", "alpha/nested"] },
+    { name: "child before parent", projects: ["alpha/nested", "alpha"] },
+  ]) {
+    test(`rejects ${name} before fetching schemas or replacing services`, async (context) => {
+      const app = await fixture(context);
+      try {
+        const targets = projects.map((project) =>
+          join(app.cwd, "src/services", project ?? "integration-app"),
+        );
+        const preservedFiles = [...new Set(targets)].map((target) => join(target, "preserved.ts"));
+        for (const file of preservedFiles) {
+          await mkdir(dirname(file), { recursive: true });
+          await writeFile(file, "export const preserved = true;\n");
+        }
+        const configs = projects.map((project, index) => {
+          const config = app.config(index === 0 ? "alpha" : "beta", true);
+          const projectName = project === undefined ? "undefined" : JSON.stringify(project);
+          return `{ ...${config}, projectName: ${projectName} }`;
+        });
+        await app.configure(`[${configs.join(", ")}]`);
+        const output = await app.run([umiCLI, "openapi"], false);
+        expect(output).toContain("Conflicting service output directories");
+        expect(output).toContain("openAPI[0]");
+        expect(output).toContain("openAPI[1]");
+        for (const target of targets) expect(output).toContain(target);
+        expect(app.schemaRequests).toEqual([]);
+        for (const file of preservedFiles) {
+          expect(await readFile(file, "utf8")).toBe("export const preserved = true;\n");
+        }
+      } finally {
+        await app.cleanup();
+      }
+    }, 200_000);
+  }
+
+  for (const { name, operationIds } of [
+    { name: "identical names", operationIds: { alpha: "fetchPet", beta: "fetchPet" } },
+    { name: "case aliases", operationIds: { alpha: "FetchPet", beta: "fetchPet" } },
+    { name: "sanitized aliases", operationIds: { alpha: "fetch-Pet", beta: "fetchPet" } },
+  ]) {
+    test(`rejects cross-schema mock ${name} before replacing any output`, async (context) => {
+      const app = await fixture(context, "src", operationIds);
+      try {
+        for (const project of ["alpha", "beta"]) {
+          const directory = join(app.cwd, "src/services", project);
+          await mkdir(directory, { recursive: true });
+          await writeFile(join(directory, "preserved.ts"), `original ${project} service`);
+        }
+        const mockDirectory = join(app.cwd, "mock");
+        await mkdir(mockDirectory);
+        await writeFile(join(mockDirectory, "fetchPet.ts"), "original generated mock");
+        await writeFile(join(mockDirectory, "handwritten.ts"), "original handwritten mock");
+        await app.configure(`[${app.config("alpha", true)}, ${app.config("beta", true)}]`);
+
+        const output = await app.run([umiCLI, "openapi"], false);
+
+        expect(output).toContain("Conflicting mock output files");
+        expect(output).toContain("openAPI[0]");
+        expect(output).toContain("openAPI[1]");
+        for (const project of ["alpha", "beta"]) {
+          const directory = join(app.cwd, "src/services", project);
+          expect(await readdir(directory)).toEqual(["preserved.ts"]);
+          expect(await readFile(join(directory, "preserved.ts"), "utf8")).toBe(
+            `original ${project} service`,
+          );
+        }
+        expect((await readdir(mockDirectory)).sort()).toEqual(["fetchPet.ts", "handwritten.ts"]);
+        expect(await readFile(join(mockDirectory, "fetchPet.ts"), "utf8")).toBe(
+          "original generated mock",
+        );
+        expect(await readFile(join(mockDirectory, "handwritten.ts"), "utf8")).toBe(
+          "original handwritten mock",
+        );
+      } finally {
+        await app.cleanup();
+      }
+    }, 200_000);
+  }
+
   test("rejects invalid configuration through Umi config validation", async (context) => {
     const app = await fixture(context);
     try {
       await app.configure("{ schemaPath: 123 }");
-      await app.run([umiCLI, "openapi"], false);
+      const output = await app.run([umiCLI, "openapi"], false);
+      expect(output).toContain("openAPI");
+      expect(output).toContain("schemaPath");
+      expect(app.schemaRequests).toEqual([]);
       await expect(stat(join(app.cwd, "src/services"))).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await app.cleanup();

@@ -1,10 +1,11 @@
 import Mock from "mockjs";
 import type { OpenAPIObject } from "openapi3-ts/oas30";
 
+import type { GeneratedFile } from "./generatedFiles";
 import OpenAPIParserMock, { type MockValue } from "./openAPIParserMock/index";
-import { get, httpMethods, isOperationObject, selectResponse } from "./openAPIParserMock/utils";
+import { get, selectResponse } from "./openAPIParserMock/utils";
+import { httpMethods, isOperationObject } from "./operations";
 import { GenerateServiceProps } from "./types";
-import { writeFile } from "./util";
 
 Mock.Random.extend({
   country() {
@@ -159,19 +160,12 @@ export default {
 ${mockFunction.join("\n,")}
     }`;
 };
-export type genMockDataServerConfig = {
+type MockRenderConfig = {
   openAPI: OpenAPIObject;
-  mockFolder: string;
   mockConfig: GenerateServiceProps["mockConfig"];
-  formatter?: GenerateServiceProps["formatter"];
 };
 
-const prepareMock = ({
-  openAPI,
-  mockFolder,
-  mockConfig,
-  formatter,
-}: genMockDataServerConfig): (() => void) => {
+export const renderMock = ({ openAPI, mockConfig }: MockRenderConfig): GeneratedFile[] => {
   const openAPParse = new OpenAPIParserMock(openAPI);
   const docs = openAPParse.parser();
   const pathList = Object.keys(docs.paths).filter((path) => path.startsWith("/"));
@@ -210,24 +204,8 @@ const prepareMock = ({
       }
     });
   });
-  const files = Object.keys(mockActionsObj).map((file) => ({
-    name: `${file}.ts`,
-    source: genMockFiles(mockActionsObj[file], mockConfig),
+  return Object.keys(mockActionsObj).map((file) => ({
+    relativePath: `${file}.ts`,
+    content: genMockFiles(mockActionsObj[file], mockConfig),
   }));
-  return () => {
-    let hasFormattingError = false;
-    for (const file of files) {
-      const hasError = writeFile(mockFolder, file.name, file.source, formatter);
-      hasFormattingError = hasError || hasFormattingError;
-    }
-    if (hasFormattingError) {
-      console.warn(
-        "[openAPI]: Mock files generated with formatting errors; unformatted content preserved",
-      );
-    } else {
-      console.log("[openAPI]: Mock files generated");
-    }
-  };
 };
-
-export { prepareMock };

@@ -61,7 +61,7 @@ export const configItemSchema = z.object({
         )
         .optional()
         .describe(
-          "Transform the OpenAPI document after initialization and return the updated document.",
+          "Transform the OpenAPI document for client services and types only; mock generation uses the original document. Return the updated document, or undefined to keep the transformed input.",
         ),
       customFunctionName: z
         .custom<NonNullable<NonNullable<GenerateServiceProps["hook"]>["customFunctionName"]>>(
@@ -108,7 +108,7 @@ export const configItemSchema = z.object({
     })
     .optional()
     .describe(
-      "Hooks for transforming the OpenAPI document and customizing generated names, types, and request options.",
+      "Hooks for client service and type generation: transform the client OpenAPI document and customize generated names, types, and request options. These hooks do not change mock generation.",
     ),
 });
 

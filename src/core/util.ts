@@ -47,7 +47,7 @@ const hasOxfmt = (filePath: string): boolean => {
   }
 };
 
-const formatFile = (
+export const formatFile = (
   content: string,
   filePath: string,
   formatter: NonNullable<GenerateServiceProps["formatter"]>,
@@ -112,21 +112,6 @@ const formatFile = (
     );
     return [content, true];
   }
-};
-
-export const writeFile = (
-  folderPath: string,
-  fileName: string,
-  content: string,
-  formatter: GenerateServiceProps["formatter"] = "auto",
-): boolean => {
-  const filePath = path.resolve(folderPath, fileName);
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const [formattedContent, hasError] = formatFile(content, filePath, formatter);
-  fs.writeFileSync(filePath, formattedContent, {
-    encoding: "utf8",
-  });
-  return hasError;
 };
 
 export const stripDot = (str: string): string => {

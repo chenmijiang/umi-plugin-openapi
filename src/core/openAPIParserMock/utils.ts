@@ -18,12 +18,6 @@ function get<T = unknown>(entity: unknown, path: (string | number)[]): T | undef
   return current as T | undefined;
 }
 
-function isOperationObject(thing: unknown): thing is OperationObject {
-  return isObject(thing) && isObject(thing.responses);
-}
-
-const httpMethods = ["get", "put", "post", "delete", "options", "head", "patch", "trace"] as const;
-
 function selectResponse(responses: OperationObject["responses"]): { code: string; status: string } {
   const codes = Object.keys(responses || {});
   const code =
@@ -36,31 +30,4 @@ function selectResponse(responses: OperationObject["responses"]): { code: string
   return { code, status: code === "default" ? "500" : code.replace("XX", "00") };
 }
 
-function resolveLocalRef<T extends object>(document: unknown, value: T): T {
-  let current = value;
-  const seen = new Set<string>();
-  while ("$ref" in current) {
-    const ref = current.$ref;
-    if (typeof ref !== "string" || !ref.startsWith("#/")) {
-      throw new Error(`[openAPI mock]: Only local JSON pointer refs are supported: ${String(ref)}`);
-    }
-    if (seen.has(ref)) throw new Error(`[openAPI mock]: Cyclic ref: ${ref}`);
-    seen.add(ref);
-    const parts = decodeURIComponent(ref.slice(2))
-      .split("/")
-      .map((part) => part.replace(/~1/g, "/").replace(/~0/g, "~"));
-    let target: unknown = document;
-    for (const part of parts) {
-      if (!isObject(target) || !Object.prototype.hasOwnProperty.call(target, part)) {
-        throw new Error(`[openAPI mock]: Missing ref: ${ref}`);
-      }
-      target = target[part];
-    }
-    if (!isObject(target) || Array.isArray(target))
-      throw new Error(`[openAPI mock]: Invalid ref target: ${ref}`);
-    current = target as T;
-  }
-  return current;
-}
-
-export { isObject, get, isOperationObject, httpMethods, resolveLocalRef, selectResponse };
+export { isObject, get, selectResponse };

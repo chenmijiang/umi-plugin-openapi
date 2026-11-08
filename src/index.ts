@@ -1,11 +1,12 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "path";
 
 import serveStatic from "serve-static";
 import { type IApi } from "umi";
 
 import { configSchema, type ConfigItem } from "./config";
-import { generateService, getSchema } from "./core";
+import { getSchema } from "./core";
+import { generateServiceBatch } from "./core/generation";
 
 function winPath(path: string): string {
   const isExtendedLengthPath = path.startsWith("\\\\?\\");
@@ -133,35 +134,44 @@ export default App;
       console.error("[openAPI]: Failed to write development schemas:", error);
     }
   });
-  const genAllFiles = async (openAPIConfig: ConfigItem) => {
-    const pageConfig = require(join(api.cwd, "package.json"));
-    const mockFolder = openAPIConfig.mock ? join(api.cwd, "mock") : undefined;
-    const serversFolder = join(api.paths.absSrcPath!, "services");
-
-    if (mockFolder && !existsSync(mockFolder)) {
-      mkdirSync(mockFolder);
-    }
-    if (serversFolder && !existsSync(serversFolder)) {
-      mkdirSync(serversFolder);
-    }
-
-    await generateService({
-      projectName: pageConfig.name.split("/").pop(),
+  const resolveConfig = (openAPIConfig: ConfigItem) => {
+    const pageConfig: { name: string } = require(join(api.cwd, "package.json"));
+    return {
       ...openAPIConfig,
-      serversPath: serversFolder,
-      mockFolder,
-    });
-    api.logger.info("[openAPI]: Generation finished");
+      projectName: openAPIConfig.projectName ?? pageConfig.name.split("/").pop()!,
+      serversPath: join(api.paths.absSrcPath!, "services"),
+      mockFolder: openAPIConfig.mock ? join(api.cwd, "mock") : undefined,
+    };
   };
   api.registerCommand({
     name: "openapi",
     fn: async () => {
-      const openAPIConfig = api.config.openAPI;
-      if (Array.isArray(openAPIConfig)) {
-        await Promise.all(openAPIConfig.map((item) => genAllFiles(item)));
-        return;
+      const configs = ([api.config.openAPI].flat() as ConfigItem[]).map(resolveConfig);
+      const targets = configs.map((config) =>
+        resolve(join(config.serversPath, config.projectName)),
+      );
+      const portableTargets = targets.map((target) => target.normalize("NFC").toLowerCase());
+      const contains = (parent: string, child: string) => {
+        const difference = relative(parent, child);
+        return !isAbsolute(difference) && difference !== ".." && !difference.startsWith(`..${sep}`);
+      };
+      for (let index = 0; index < targets.length; index += 1) {
+        for (let previous = 0; previous < index; previous += 1) {
+          if (
+            contains(portableTargets[previous]!, portableTargets[index]!) ||
+            contains(portableTargets[index]!, portableTargets[previous]!)
+          ) {
+            throw new Error(
+              `[openAPI]: Conflicting service output directories: openAPI[${previous}] ` +
+                `(${JSON.stringify(configs[previous]!.schemaPath)}) targets ${JSON.stringify(targets[previous])}; ` +
+                `openAPI[${index}] (${JSON.stringify(configs[index]!.schemaPath)}) targets ${JSON.stringify(targets[index])}. ` +
+                "Service directories must not be equal or overlap.",
+            );
+          }
+        }
       }
-      await genAllFiles(openAPIConfig);
+      await generateServiceBatch(configs);
+      api.logger.info("[openAPI]: Generation finished");
     },
   });
 }

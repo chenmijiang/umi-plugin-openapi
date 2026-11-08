@@ -98,7 +98,9 @@ async function compileConsumer(outputPath: string) {
     // @ts-expect-error additionalProperties retains its value type
     const invalidDictionary: API.Constraints = { dictionary: { key: 1 } };
     const result: API.SearchResult = { message: "not found" };
-    const list: API.ItemList = [];
+    const list: API.ItemList = [{ id: "item-7", name: "Milo", secret: "token" }];
+    // @ts-expect-error array references retain the referenced property types
+    const invalidList: API.ItemList = [{ id: 7, name: "Milo", secret: "token" }];
     const read = syntax.readItem({ id: "item-7", locale: "en" });
     const written = syntax.replaceItem({ id: "item-7", locale: "en" },
       { name: "Milo", secret: "token", nickname: null });
@@ -112,10 +114,17 @@ async function compileConsumer(outputPath: string) {
     syntax.submitForm({ names: ["a", "b"], note: "hello world" });
     syntax.readAlias();
     read.then(item => {
-      if (item !== undefined) { const name: string = item.name; }
+      if (item !== undefined) {
+        const id: string = item.id;
+        const name: string = item.name;
+        // @ts-expect-error response-direction models omit writeOnly fields
+        item.secret;
+      }
     });
     // @ts-expect-error inherited path parameters remain required
     syntax.readItem({ locale: "en" });
+    // @ts-expect-error operation-level parameters override inherited optionality
+    syntax.readItem({ id: "item-7" });
     // @ts-expect-error request-direction required writeOnly secret must be supplied
     syntax.replaceItem({ id: "item-7", locale: "en" }, { name: "Milo" });
   `,
@@ -171,7 +180,7 @@ async function loadClient(outputPath: string, calls: RequestCall[]) {
   return module.exports as Record<string, (...args: unknown[]) => Promise<unknown>>;
 }
 
-describe("complete OpenAPI 3.0 syntax through the published API", () => {
+describe("OpenAPI 3.0 client behavior beside descriptive syntax", () => {
   test("a strict TypeScript consumer uses generated methods, refs, unions, enums and directional models", async ({
     onTestFinished,
   }) => {
@@ -191,7 +200,12 @@ describe("complete OpenAPI 3.0 syntax through the published API", () => {
     await client.replaceItem({ id: "item-7", locale: "en" }, { name: "Milo", secret: "token" });
     expect(calls[1]).toMatchObject({
       url: "https://items.example.com/items/item-7",
-      options: { method: "PUT", params: { locale: "en" }, data: { name: "Milo", secret: "token" } },
+      options: {
+        method: "PUT",
+        params: { locale: "en" },
+        data: { name: "Milo", secret: "token" },
+        headers: { "Content-Type": "application/json" },
+      },
     });
     await client.styledPath({ label: ["a", "b"], matrix: { role: "admin" }, simple: [1, 2] });
     expect(calls[2].url).toBe("https://eu.example.com/v1/styled/.a.b/;role=admin/1,2");
@@ -235,6 +249,8 @@ describe("complete OpenAPI 3.0 syntax through the published API", () => {
     const styledRequest = calls.at(-1)!;
     const query = new URL(styledRequest.url).searchParams;
     expect(query.get("q")).toBe("a/b");
+    // Decoding alone would also accept an incorrectly percent-encoded reserved slash.
+    expect(styledRequest.url).toContain("q=a/b");
     expect(query.get("colors")).toBe("red,blue");
     expect(query.get("spaces")).toBe("a b");
     expect(query.get("pipes")).toBe("x|y");

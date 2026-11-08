@@ -1,4 +1,4 @@
-import fs, { existsSync, globSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "path";
 
 import { camelCase } from "lodash";
@@ -9,7 +9,6 @@ import type {
   OpenAPIObject,
   OperationObject,
   ParameterObject,
-  PathItemObject,
   ReferenceObject,
   RequestBodyObject,
   ResponseObject,
@@ -17,8 +16,10 @@ import type {
   SchemaObject,
 } from "openapi3-ts/oas30";
 
+import type { GeneratedFile } from "./generatedFiles";
+import { httpMethods, normalizeOperations } from "./operations";
 import type { GenerateServiceProps } from "./types";
-import { stripDot, writeFile } from "./util";
+import { stripDot } from "./util";
 
 const reservedWords = new Set([
   "await",
@@ -137,13 +138,56 @@ interface ResponseTemplate {
   responseType?: "text" | "blob";
 }
 
+interface OperationTemplate extends APIDataType {
+  parameterDefinitions: (Pick<
+    TemplateParameter,
+    "name" | "inputName" | "in" | "style" | "explode" | "allowReserved"
+  > & { contentType?: string })[];
+  encoding: NonNullable<RequestBodyObject["content"][string]["encoding"]>;
+  functionName: string;
+  typeName: string;
+  pathInComment: string;
+  hasPathVariables: boolean;
+  hasApiPrefix: boolean;
+  desc: string;
+  hasHeader: boolean;
+  params: Record<string, TemplateParameter[]>;
+  hasParams: boolean;
+  options: Record<string, unknown>;
+  body: BodyTemplate | null;
+  file: FileTemplate[] | null;
+  hasFormData: boolean;
+  response: ResponseTemplate;
+}
+
 interface ServiceTemplate {
   genType: string;
   className: string;
   instanceName: string;
   hasParameters: boolean;
   hasFormBody: boolean;
-  list: Record<string, unknown>[];
+  list: OperationTemplate[];
+}
+
+interface TemplateContexts {
+  interface: {
+    namespace?: string;
+    nullable?: boolean;
+    list: InterfaceTemplate[];
+    disableTypeCheck?: boolean;
+    declareType: "type" | "interface";
+    equalSymbol: "=" | "";
+  };
+  serviceController: ServiceTemplate & {
+    namespace?: string;
+    requestOptionsType?: string;
+    requestImportStatement?: string;
+    disableTypeCheck: boolean;
+  };
+  serviceIndex: {
+    list: ControllerType[];
+    disableTypeCheck: boolean;
+  };
 }
 
 interface TemplateParameter extends Omit<ParameterObject, "schema"> {
@@ -156,7 +200,7 @@ interface TemplateParameter extends Omit<ParameterObject, "schema"> {
   $ref?: string;
 }
 
-export type TypescriptFileType = "interface" | "serviceController" | "serviceIndex";
+export type TypescriptFileType = keyof TemplateContexts;
 
 export interface APIDataType extends OperationObject {
   path: string;
@@ -246,7 +290,6 @@ const escapeComment = (text: string): string =>
 
 const escapeTemplateText = (text: string): string =>
   text.replace(/[\\`$]/g, (character) => `\\${character}`);
-const METHODS = ["get", "put", "post", "delete", "options", "head", "patch", "trace"] as const;
 const selectMedia = (content: ContentObject = {}): string => {
   const keys = Object.keys(content);
   return (
@@ -448,9 +491,6 @@ class ServiceGenerator {
 
   protected classNameList: ControllerType[] = [];
 
-  protected finalPath: string;
-
-  private hasFormattingError = false;
   private directionNames = new Map<string, string>();
   private schemaNames = new Map<string, string>();
   private parameterNames = new Map<string, string>();
@@ -461,7 +501,6 @@ class ServiceGenerator {
   protected openAPIData: OpenAPIObject;
 
   constructor(config: GenerateServiceProps, openAPIData: OpenAPIObject) {
-    this.finalPath = "";
     this.config = {
       projectName: "api",
       templatesFolder: existsSync(join(__dirname, "templates"))
@@ -470,34 +509,34 @@ class ServiceGenerator {
       dedupeApiPrefix: true,
       ...config,
     };
-    if (this.config.hook?.afterOpenApiDataInited) {
-      this.openAPIData = this.config.hook.afterOpenApiDataInited(openAPIData) || openAPIData;
-    } else {
-      this.openAPIData = openAPIData;
-    }
+    const initialize = this.config.hook?.afterOpenApiDataInited;
+    const hasClientHook =
+      typeof initialize === "function" ||
+      typeof this.config.hook?.customFunctionName === "function" ||
+      typeof this.config.hook?.customTypeName === "function" ||
+      typeof this.config.hook?.customOptionsDefaultValue === "function" ||
+      typeof this.config.hook?.customClassName === "function" ||
+      typeof this.config.hook?.customType === "function" ||
+      typeof this.config.hook?.customFileNames === "function";
+    const hookDocument = hasClientHook ? structuredClone(openAPIData) : openAPIData;
+    this.openAPIData = normalizeOperations(
+      initialize?.call(this.config.hook, hookDocument) || hookDocument,
+    );
     const hookCustomFileNames = this.config.hook?.customFileNames || defaultGetFileTag;
     Object.keys(this.openAPIData.paths || {}).forEach((p) => {
       if (!p.startsWith("/")) return;
-      const pathItem = this.resolveRefObject<PathItemObject>(this.openAPIData.paths[p]);
-      this.openAPIData.paths[p] = pathItem;
-      METHODS.forEach((method) => {
-        const original = pathItem[method];
-        const parameters = new Map<string, ParameterObject>();
-        [...(pathItem.parameters || []), ...(original?.parameters || [])].forEach((item) => {
-          const parameter = this.resolveRefObject<ParameterObject>(item);
-          if (
-            parameter.in === "header" &&
-            /^(accept|content-type|authorization)$/i.test(parameter.name)
-          )
-            return;
-          parameters.set(`${parameter.in}:${parameter.name}`, parameter);
-        });
-        const operationObject = original && {
-          ...original,
-          parameters: [...parameters.values()],
-          servers: original.servers || pathItem.servers || this.openAPIData.servers,
-        };
-        if (operationObject) pathItem[method] = operationObject;
+      const pathItem = this.openAPIData.paths[p];
+      httpMethods.forEach((method) => {
+        const operationObject = pathItem[method];
+        if (operationObject) {
+          operationObject.parameters = operationObject.parameters?.filter((item) => {
+            const parameter = this.resolveRefObject<ParameterObject>(item);
+            return !(
+              parameter.in === "header" &&
+              /^(accept|content-type|authorization)$/i.test(parameter.name)
+            );
+          });
+        }
         if (!operationObject) {
           return;
         }
@@ -528,74 +567,43 @@ class ServiceGenerator {
     );
   }
 
-  public genFile(): void {
-    this.hasFormattingError = false;
-    const basePath = this.config.serversPath || "./src/service";
-    const finalPath = join(basePath, this.config.projectName);
-    this.finalPath = finalPath;
+  public renderFiles(): GeneratedFile[] {
     const declarations = this.getInterfaceTP();
     this.classNameList = [];
-    const services = this.getServiceTP();
-    try {
-      for (const relativePath of globSync("**/*", { cwd: finalPath })) {
-        const filePath = join(finalPath, relativePath);
-        if (!filePath.includes("_deperated")) {
-          fs.rmSync(filePath, { recursive: true, force: true });
-        }
-      }
-    } catch (error) {
-      console.log(`[openAPI]: Failed to clean service output directory: ${String(error)}`);
-    }
-    if (!this.config.splitDeclare) {
-      // 生成 ts 类型声明
-      this.genFileFromTemplate("typings.d.ts", "interface", {
-        namespace: this.config.namespace,
-        nullable: this.config.nullable,
-        // namespace: 'API',
-        list: declarations,
-        disableTypeCheck: false,
-        declareType: this.config.declareType || "type",
-        equalSymbol: (this.config.declareType || "type") === "type" ? "=" : "",
-      });
-    } else {
-      // 创建存放声明文件的文件夹
-      const typesDir = join(finalPath, "types");
-      if (!existsSync(typesDir)) {
-        fs.mkdirSync(typesDir, { recursive: true });
-      }
-      // 按tag生成多个类型声明文件
-      this.genTypeFilesByTag(declarations);
-    }
-    // 生成 controller 文件
-    // 生成 service 统计
-    services.forEach((tp) => {
-      // 根据当前数据源类型选择恰当的 controller 模版
-      const template = "serviceController";
-      this.genFileFromTemplate(this.getFinalFileName(`${tp.className}.ts`), template, {
+    const services = this.getServiceTP().map((service) => ({
+      fileName: this.getFinalFileName(`${service.className}.ts`),
+      context: {
         namespace: this.config.namespace,
         requestOptionsType: this.config.requestOptionsType,
         requestImportStatement: this.config.requestImportStatement,
         disableTypeCheck: false,
-        ...tp,
-      });
-    });
-
-    // 生成 index 文件
-    this.genFileFromTemplate(`index.ts`, "serviceIndex", {
+        ...service,
+      } satisfies TemplateContexts["serviceController"],
+    }));
+    const index: TemplateContexts["serviceIndex"] = {
       list: [...this.classNameList].sort((a, b) =>
         a.fileName < b.fileName ? -1 : a.fileName > b.fileName ? 1 : 0,
       ),
       disableTypeCheck: false,
-    });
+    };
 
-    // 打印日志
-    if (this.hasFormattingError) {
-      console.warn(
-        "[openAPI]: Service files generated with formatting errors; unformatted content preserved",
-      );
-    } else {
-      console.log("[openAPI]: Service files generated");
+    const files = this.config.splitDeclare
+      ? this.genTypeFilesByTag(declarations)
+      : [
+          this.genFileFromTemplate("typings.d.ts", "interface", {
+            namespace: this.config.namespace,
+            nullable: this.config.nullable,
+            list: declarations,
+            disableTypeCheck: false,
+            declareType: this.config.declareType || "type",
+            equalSymbol: (this.config.declareType || "type") === "type" ? "=" : "",
+          }),
+        ];
+    for (const service of services) {
+      files.push(this.genFileFromTemplate(service.fileName, "serviceController", service.context));
     }
+    files.push(this.genFileFromTemplate("index.ts", "serviceIndex", index));
+    return files;
   }
 
   public getFuncationName(data: APIDataType): string {
@@ -1226,24 +1234,21 @@ class ServiceGenerator {
     return result;
   }
 
-  private genFileFromTemplate(
+  private genFileFromTemplate<T extends TypescriptFileType>(
     fileName: string,
-    type: TypescriptFileType,
-    params: Record<string, unknown>,
-  ): void {
+    type: T,
+    params: TemplateContexts[T],
+  ): GeneratedFile {
     try {
       const template = this.getTemplate(type);
       // 设置输出不转义
       nunjucks.configure({
         autoescape: false,
       });
-      const hasError = writeFile(
-        this.finalPath,
-        fileName,
-        nunjucks.renderString(template, params),
-        this.config.formatter,
-      );
-      this.hasFormattingError = hasError || this.hasFormattingError;
+      return {
+        relativePath: fileName,
+        content: nunjucks.renderString(template, params),
+      };
     } catch (error) {
       // eslint-disable-next-line no-console
       console.error(`[openAPI]: Failed to generate ${fileName} from template "${type}"`);
@@ -1251,8 +1256,8 @@ class ServiceGenerator {
     }
   }
 
-  private getTemplate(type: "interface" | "serviceController" | "serviceIndex"): string {
-    return fs.readFileSync(join(this.config.templatesFolder, `${type}.njk`), "utf8");
+  private getTemplate(type: TypescriptFileType): string {
+    return readFileSync(join(this.config.templatesFolder, `${type}.njk`), "utf8");
   }
 
   // 获取 TS 类型的属性列表
@@ -1484,32 +1489,46 @@ class ServiceGenerator {
     return functionName;
   }
   // 按tag生成类型文件
-  private genTypeFilesByTag(declarations: InterfaceTemplate[]): void {
+  private genTypeFilesByTag(declarations: InterfaceTemplate[]): GeneratedFile[] {
     const remaining = new Map(declarations.map((type) => [type.typeName, type]));
     const tags = Object.keys(this.apiData);
+    const templates: { fileName: string; context: TemplateContexts["interface"] }[] = [];
     tags.forEach((tag, index) => {
-      const names = new Set(this.apiData[tag].map((api) => this.getTypeName(api)));
+      const names = new Set(
+        this.apiData[tag].map((api) =>
+          this.parameterNames.get(JSON.stringify([api.path, api.method]))!,
+        ),
+      );
       const list = declarations.filter(
         (type) =>
           remaining.has(type.typeName) && (names.has(type.typeName) || index === tags.length - 1),
       );
       list.forEach((type) => remaining.delete(type.typeName));
-      this.genFileFromTemplate(`types/${this.replaceDot(tag)}.d.ts`, "interface", {
-        namespace: this.config.namespace,
-        nullable: this.config.nullable,
-        list,
-        disableTypeCheck: false,
-        declareType: this.config.declareType || "type",
-        equalSymbol: (this.config.declareType || "type") === "type" ? "=" : "",
+      templates.push({
+        fileName: `types/${this.replaceDot(tag)}.d.ts`,
+        context: {
+          namespace: this.config.namespace,
+          nullable: this.config.nullable,
+          list,
+          disableTypeCheck: false,
+          declareType: this.config.declareType || "type",
+          equalSymbol: (this.config.declareType || "type") === "type" ? "=" : "",
+        },
       });
     });
     if (!tags.length && declarations.length)
-      this.genFileFromTemplate("types/common.d.ts", "interface", {
-        namespace: this.config.namespace,
-        list: declarations,
-        declareType: "type",
-        equalSymbol: "=",
+      templates.push({
+        fileName: "types/common.d.ts",
+        context: {
+          namespace: this.config.namespace,
+          list: declarations,
+          declareType: "type",
+          equalSymbol: "=",
+        },
       });
+    return templates.map(({ fileName, context }) =>
+      this.genFileFromTemplate(fileName, "interface", context),
+    );
   }
 }
 

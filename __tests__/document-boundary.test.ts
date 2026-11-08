@@ -1,4 +1,5 @@
 import { once } from "node:events";
+import type * as FileSystem from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { createServer, type RequestListener } from "node:http";
 import { createRequire } from "node:module";
@@ -8,11 +9,12 @@ import { pathToFileURL } from "node:url";
 
 import * as ts from "typescript";
 import type { TestContext } from "vitest";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import type * as Core from "../src/core";
 
 const require = createRequire(import.meta.url);
+const fs = require("node:fs") as typeof FileSystem;
 const { getSchema, generateService } = require("umi-plugin-openapi/core") as typeof Core;
 const document = {
   openapi: "3.0.3",
@@ -239,6 +241,216 @@ describe("published core document boundary", () => {
       }
       void consume;
     `,
+    );
+  });
+});
+
+describe("published core output publication", { concurrent: false }, () => {
+  const publicationDocument = {
+    ...document,
+    paths: {
+      "/first": {
+        get: {
+          tags: ["items"],
+          operationId: "first",
+          responses: {
+            "200": { description: "First", content: { "application/json": { example: 1 } } },
+          },
+        },
+      },
+      "/second": {
+        get: {
+          tags: ["items"],
+          operationId: "second",
+          responses: {
+            "200": { description: "Second", content: { "application/json": { example: 2 } } },
+          },
+        },
+      },
+    },
+  };
+
+  test("a late template failure leaves existing services and mocks unchanged", async ({
+    onTestFinished,
+  }) => {
+    const config = await fixture(onTestFinished, publicationDocument);
+    const outputPath = join(config.serversPath, "api");
+    const mockFolder = join(config.serversPath, "..", "mocks");
+    const templatesFolder = join(config.serversPath, "..", "templates");
+    await mkdir(outputPath, { recursive: true });
+    await mkdir(mockFolder);
+    await mkdir(templatesFolder);
+    await writeFile(join(outputPath, "old.ts"), "original service");
+    await writeFile(join(mockFolder, "first.ts"), "original mock");
+    await writeFile(join(templatesFolder, "interface.njk"), "export type Rendered = string;");
+    await writeFile(
+      join(templatesFolder, "serviceController.njk"),
+      "export const rendered = true;",
+    );
+    await writeFile(join(templatesFolder, "serviceIndex.njk"), "{% if %}");
+
+    await expect(
+      generateService({ ...config, mockFolder, templatesFolder, formatter: "none" }),
+    ).rejects.toThrow();
+
+    expect(await readdir(outputPath)).toEqual(["old.ts"]);
+    expect(await readFile(join(outputPath, "old.ts"), "utf8")).toBe("original service");
+    expect(await readdir(mockFolder)).toEqual(["first.ts"]);
+    expect(await readFile(join(mockFolder, "first.ts"), "utf8")).toBe("original mock");
+  });
+
+  for (const { restoreFails, cleanupFails } of [
+    { restoreFails: false, cleanupFails: false },
+    { restoreFails: true, cleanupFails: false },
+    { restoreFails: false, cleanupFails: true },
+    { restoreFails: true, cleanupFails: true },
+  ]) {
+    test(`retains recoverable services after installation fails (restore failure: ${restoreFails}, stage cleanup failure: ${cleanupFails})`, async ({
+      onTestFinished,
+    }) => {
+      const config = await fixture(onTestFinished, publicationDocument);
+      const outputPath = join(config.serversPath, "api");
+      const original = "original service contents";
+      await mkdir(outputPath, { recursive: true });
+      await writeFile(join(outputPath, "old.ts"), original);
+      const installError = new Error("injected service installation failure");
+      const restoreError = new Error("injected service restoration failure");
+      const cleanupError = new Error("injected staging cleanup failure");
+      const renameSync = fs.renameSync;
+      const rmSync = fs.rmSync;
+      let backupPath = "";
+      let stagePath = "";
+      const rename = vi.spyOn(fs, "renameSync");
+      const remove = vi.spyOn(fs, "rmSync");
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        rename.mockImplementation((from, to) => {
+          if (from === outputPath) {
+            backupPath = String(to);
+          }
+          if (to === outputPath && from !== backupPath) {
+            stagePath = String(from);
+            throw installError;
+          }
+          if (restoreFails && to === outputPath && from === backupPath) throw restoreError;
+          return renameSync(from, to);
+        });
+        remove.mockImplementation((target, options) => {
+          if (cleanupFails && target === stagePath) throw cleanupError;
+          return rmSync(target, options);
+        });
+
+        const generation = generateService({ ...config, formatter: "none" });
+        if (restoreFails) {
+          await expect(generation).rejects.toThrow(installError.message);
+          await expect(generation).rejects.toThrow(restoreError.message);
+          await expect(generation).rejects.toThrow(`backup retained at ${backupPath}`);
+          await expect(readdir(outputPath)).rejects.toMatchObject({ code: "ENOENT" });
+          expect(await readdir(backupPath)).toEqual(["old.ts"]);
+          expect(await readFile(join(backupPath, "old.ts"), "utf8")).toBe(original);
+          // Recover with the real filesystem boundary, bypassing the injected failure.
+          renameSync(backupPath, outputPath);
+        } else {
+          await expect(generation).rejects.toBe(installError);
+          await expect(readdir(backupPath)).rejects.toMatchObject({ code: "ENOENT" });
+        }
+        expect(await readdir(outputPath)).toEqual(["old.ts"]);
+        expect(await readFile(join(outputPath, "old.ts"), "utf8")).toBe(original);
+        if (cleanupFails) {
+          expect(warn).toHaveBeenCalledWith(expect.stringContaining(stagePath), cleanupError);
+          expect(await readdir(stagePath)).toEqual(
+            expect.arrayContaining(["index.ts", "items.ts", "typings.d.ts"]),
+          );
+        } else {
+          await expect(readdir(stagePath)).rejects.toMatchObject({ code: "ENOENT" });
+        }
+      } finally {
+        rename.mockRestore();
+        remove.mockRestore();
+        warn.mockRestore();
+        await rm(join(config.schemaPath, ".."), { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("case-aliasing mock names reject generation before changing either output", async ({
+    onTestFinished,
+  }) => {
+    const config = await fixture(onTestFinished, {
+      ...publicationDocument,
+      paths: {
+        "/first": {
+          get: { ...publicationDocument.paths["/first"].get, operationId: "First" },
+        },
+        "/second": {
+          get: { ...publicationDocument.paths["/second"].get, operationId: "first" },
+        },
+      },
+    });
+    const outputPath = join(config.serversPath, "api");
+    const mockFolder = join(config.serversPath, "..", "mocks");
+    await mkdir(outputPath, { recursive: true });
+    await mkdir(mockFolder);
+    await writeFile(join(outputPath, "original.ts"), "original service");
+    await writeFile(join(mockFolder, "first.ts"), "original mock");
+
+    await expect(generateService({ ...config, mockFolder, formatter: "none" })).rejects.toThrow(
+      /duplicate generated file paths/i,
+    );
+
+    expect(await readdir(outputPath)).toEqual(["original.ts"]);
+    expect(await readFile(join(outputPath, "original.ts"), "utf8")).toBe("original service");
+    expect(await readdir(mockFolder)).toEqual(["first.ts"]);
+    expect(await readFile(join(mockFolder, "first.ts"), "utf8")).toBe("original mock");
+  });
+
+  test("successful publication replaces stale services but retains unrelated mock files", async ({
+    onTestFinished,
+  }) => {
+    const config = await fixture(onTestFinished, publicationDocument);
+    const outputPath = join(config.serversPath, "api");
+    const mockFolder = join(config.serversPath, "..", "mocks");
+    await mkdir(outputPath, { recursive: true });
+    await mkdir(mockFolder);
+    await writeFile(join(outputPath, "obsolete.ts"), "old generated service");
+    await writeFile(join(mockFolder, "handwritten.ts"), "export default { handwritten: true };");
+    await writeFile(join(mockFolder, "first.ts"), "old generated mock");
+
+    await generateService({ ...config, mockFolder, formatter: "none" });
+
+    expect((await readdir(outputPath)).sort()).toEqual(["index.ts", "items.ts", "typings.d.ts"]);
+    expect(await readFile(join(mockFolder, "handwritten.ts"), "utf8")).toBe(
+      "export default { handwritten: true };",
+    );
+    expect(await readFile(join(mockFolder, "first.ts"), "utf8")).toContain("GET /first");
+    expect(await readFile(join(mockFolder, "second.ts"), "utf8")).toContain("GET /second");
+  });
+
+  test("an obstructed mock rolls back new files and replacements without deleting the obstruction", async ({
+    onTestFinished,
+  }) => {
+    const config = await fixture(onTestFinished, {
+      ...publicationDocument,
+      paths: {
+        ...publicationDocument.paths,
+        "/third": {
+          get: { ...publicationDocument.paths["/second"].get, operationId: "third" },
+        },
+      },
+    });
+    const mockFolder = join(config.serversPath, "..", "mocks");
+    await mkdir(join(mockFolder, "third.ts"), { recursive: true });
+    await writeFile(join(mockFolder, "second.ts"), "original second mock");
+    await writeFile(join(mockFolder, "third.ts", "handwritten.txt"), "do not delete");
+
+    await expect(generateService({ ...config, mockFolder, formatter: "none" })).rejects.toThrow(
+      /Mock output is not a file/,
+    );
+
+    expect((await readdir(mockFolder)).sort()).toEqual(["second.ts", "third.ts"]);
+    expect(await readFile(join(mockFolder, "second.ts"), "utf8")).toBe("original second mock");
+    expect(await readFile(join(mockFolder, "third.ts", "handwritten.txt"), "utf8")).toBe(
+      "do not delete",
     );
   });
 });
@@ -752,7 +964,7 @@ describe("published core reference documents", () => {
     const existingOutput = "export const existing = true;\n";
     await writeFile(join(outputPath, "existing.ts"), existingOutput);
 
-    await expect(generateService(config)).rejects.toThrow();
+    await expect(generateService(config)).rejects.toThrow(/Failed to load reference .*HTTP 503/);
     expect(requests).toEqual(["/schema.json"]);
     expect(await readdir(outputPath)).toEqual(["existing.ts"]);
     expect(await readFile(join(outputPath, "existing.ts"), "utf8")).toBe(existingOutput);
@@ -839,7 +1051,7 @@ describe("published core reference documents", () => {
           ...config,
           schemaPath: root === "remote" ? remoteURL : config.schemaPath,
         }),
-      ).rejects.toThrow();
+      ).rejects.toThrow(/Remote documents cannot reference local files/);
       expect(requests).toEqual(["/schema.json"]);
       expect(await readdir(outputPath)).toEqual(["existing.ts"]);
       expect(await readFile(join(outputPath, "existing.ts"), "utf8")).toBe(existingOutput);

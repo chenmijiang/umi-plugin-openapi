@@ -46,8 +46,8 @@ export type GenerateServiceProps = {
   authorization?: string;
 
   hook?: {
-    /** change open api data after constructor */
-    afterOpenApiDataInited?: (openAPIData: OpenAPIObject) => OpenAPIObject;
+    /** Transform an isolated client document; mutations and returned documents never affect mocks. */
+    afterOpenApiDataInited?: (openAPIData: OpenAPIObject) => OpenAPIObject | void;
 
     /** 自定义函数名称 */
     customFunctionName?: (data: APIDataType) => string;
