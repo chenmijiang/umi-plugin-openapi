@@ -1,0 +1,603 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Complete OpenAPI 3.0 syntax",
+    "description": "A client-generation fixture, not a runtime validation contract.",
+    "termsOfService": "https://example.com/terms",
+    "contact": {
+      "name": "API team",
+      "url": "https://example.com/support",
+      "email": "api@example.com",
+      "x-team": "platform"
+    },
+    "license": { "name": "MIT", "url": "https://opensource.org/licenses/MIT" },
+    "version": "1.0.0",
+    "x-audience": "integration"
+  },
+  "servers": [
+    {
+      "url": "https://{region}.example.com/{version}",
+      "description": "Regional API",
+      "variables": {
+        "region": { "enum": ["eu", "us"], "default": "eu", "description": "Deployment region" },
+        "version": { "default": "v1" }
+      }
+    }
+  ],
+  "externalDocs": { "description": "API guide", "url": "https://example.com/docs" },
+  "tags": [
+    {
+      "name": "syntax",
+      "description": "Ordinary client operations alongside descriptive features",
+      "externalDocs": { "url": "https://example.com/syntax" }
+    }
+  ],
+  "security": [{ "ApiKey": [], "Basic": [] }, { "OAuth": ["read:items"] }, {}],
+  "paths": {
+    "x-purpose": "All eight OpenAPI 3.0 HTTP operations",
+    "/items/{id}": {
+      "summary": "An individual item",
+      "description": "Inherited path parameters and operation-level replacement",
+      "servers": [{ "url": "https://items.example.com" }],
+      "parameters": [
+        { "$ref": "#/components/parameters/ItemId" },
+        { "name": "locale", "in": "query", "schema": { "type": "string", "default": "en" } }
+      ],
+      "get": {
+        "tags": ["syntax"],
+        "summary": "Read an item",
+        "description": "Return the public item representation",
+        "operationId": "readItem",
+        "externalDocs": { "description": "Read guide", "url": "https://example.com/read" },
+        "deprecated": true,
+        "servers": [{ "url": "https://read.example.com" }],
+        "security": [],
+        "parameters": [
+          {
+            "name": "locale",
+            "in": "query",
+            "required": true,
+            "description": "Overrides the optional inherited locale",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "Query text",
+            "deprecated": true,
+            "allowEmptyValue": true,
+            "allowReserved": true,
+            "style": "form",
+            "explode": true,
+            "schema": { "type": "string" },
+            "example": "a/b"
+          },
+          {
+            "name": "colors",
+            "in": "query",
+            "style": "form",
+            "explode": false,
+            "schema": { "type": "array", "items": { "type": "string" } },
+            "examples": { "primary": { "$ref": "#/components/examples/Colors" } }
+          },
+          {
+            "name": "spaces",
+            "in": "query",
+            "style": "spaceDelimited",
+            "explode": false,
+            "schema": { "type": "array", "items": { "type": "string" } }
+          },
+          {
+            "name": "pipes",
+            "in": "query",
+            "style": "pipeDelimited",
+            "explode": false,
+            "schema": { "type": "array", "items": { "type": "string" } }
+          },
+          {
+            "name": "filter",
+            "in": "query",
+            "style": "deepObject",
+            "explode": true,
+            "schema": { "type": "object", "additionalProperties": { "type": "string" } }
+          },
+          {
+            "name": "X-Trace",
+            "in": "header",
+            "style": "simple",
+            "explode": false,
+            "schema": { "type": "array", "items": { "type": "string" } }
+          },
+          {
+            "name": "session",
+            "in": "cookie",
+            "style": "form",
+            "explode": true,
+            "schema": { "type": "string" }
+          },
+          { "$ref": "#/components/parameters/JsonQuery" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/ItemResponse" },
+          "204": { "description": "No representation" },
+          "4XX": {
+            "description": "Client error",
+            "content": {
+              "application/problem+json": { "schema": { "$ref": "#/components/schemas/Problem" } }
+            }
+          },
+          "default": {
+            "description": "Unexpected response",
+            "headers": {
+              "X-Error": { "description": "Error identifier", "schema": { "type": "string" } }
+            }
+          }
+        },
+        "x-client-note": "security and links are descriptive, not automatically executed"
+      },
+      "put": {
+        "tags": ["syntax"],
+        "operationId": "replaceItem",
+        "requestBody": { "$ref": "#/components/requestBodies/ItemBody" },
+        "responses": { "200": { "$ref": "#/components/responses/ItemResponse" } }
+      },
+      "post": {
+        "tags": ["syntax"],
+        "operationId": "createItem",
+        "security": [{ "Bearer": [] }],
+        "requestBody": { "$ref": "#/components/requestBodies/ItemBody" },
+        "callbacks": { "changed": { "$ref": "#/components/callbacks/OnChange" } },
+        "responses": { "201": { "$ref": "#/components/responses/ItemResponse" } }
+      },
+      "delete": {
+        "tags": ["syntax"],
+        "operationId": "deleteItem",
+        "responses": { "204": { "description": "Deleted" } }
+      },
+      "options": {
+        "tags": ["syntax"],
+        "operationId": "optionsItem",
+        "responses": {
+          "204": {
+            "description": "Capabilities",
+            "headers": {
+              "Allow": { "schema": { "type": "string" }, "example": "GET, HEAD, OPTIONS" }
+            }
+          }
+        }
+      },
+      "head": {
+        "tags": ["syntax"],
+        "operationId": "headItem",
+        "responses": {
+          "200": {
+            "description": "Metadata only",
+            "headers": { "ETag": { "$ref": "#/components/headers/ETag" } }
+          }
+        }
+      },
+      "patch": {
+        "tags": ["syntax"],
+        "operationId": "patchItem",
+        "requestBody": {
+          "description": "Partial update",
+          "content": {
+            "application/merge-patch+json": {
+              "schema": { "type": "object", "additionalProperties": true }
+            }
+          }
+        },
+        "responses": { "204": { "description": "Patched" } }
+      },
+      "trace": {
+        "tags": ["syntax"],
+        "operationId": "traceItem",
+        "responses": {
+          "200": {
+            "description": "Request trace",
+            "content": { "message/http": { "schema": { "type": "string" } } }
+          }
+        }
+      }
+    },
+    "/styled/{label}/{matrix}/{simple}": {
+      "get": {
+        "tags": ["syntax"],
+        "operationId": "styledPath",
+        "parameters": [
+          {
+            "name": "label",
+            "in": "path",
+            "required": true,
+            "style": "label",
+            "explode": true,
+            "schema": { "type": "array", "items": { "type": "string" } }
+          },
+          {
+            "name": "matrix",
+            "in": "path",
+            "required": true,
+            "style": "matrix",
+            "explode": true,
+            "schema": { "type": "object", "additionalProperties": { "type": "string" } }
+          },
+          {
+            "name": "simple",
+            "in": "path",
+            "required": true,
+            "style": "simple",
+            "explode": true,
+            "schema": { "type": "array", "items": { "type": "integer" } }
+          }
+        ],
+        "responses": { "204": { "description": "Styled request accepted" } }
+      }
+    },
+    "/upload": {
+      "post": {
+        "tags": ["syntax"],
+        "operationId": "uploadItem",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": ["file"],
+                "properties": {
+                  "file": { "type": "string", "format": "binary" },
+                  "meta": { "type": "object", "additionalProperties": { "type": "string" } },
+                  "labels": { "type": "array", "items": { "type": "string" } }
+                }
+              },
+              "encoding": {
+                "file": {
+                  "contentType": "application/octet-stream, image/png",
+                  "headers": { "X-Part": { "$ref": "#/components/headers/ETag" } }
+                },
+                "meta": { "contentType": "application/*" },
+                "labels": { "style": "form", "explode": true, "allowReserved": false }
+              }
+            }
+          }
+        },
+        "responses": { "204": { "description": "Uploaded" } }
+      }
+    },
+    "/form": {
+      "post": {
+        "tags": ["syntax"],
+        "operationId": "submitForm",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "required": ["names"],
+                "properties": {
+                  "names": { "type": "array", "items": { "type": "string" } },
+                  "note": { "type": "string" }
+                }
+              },
+              "encoding": { "names": { "style": "form", "explode": false, "allowReserved": true } }
+            }
+          }
+        },
+        "responses": { "204": { "description": "Submitted" } }
+      }
+    },
+    "/alias": { "$ref": "#/x-reusable-path" }
+  },
+  "x-reusable-path": {
+    "summary": "Reference target for a Path Item",
+    "get": {
+      "tags": ["syntax"],
+      "operationId": "readAlias",
+      "responses": { "204": { "description": "Alias available" } }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Item": {
+        "title": "Public item",
+        "description": "Read/write item fields",
+        "type": "object",
+        "required": ["id", "name", "secret"],
+        "properties": {
+          "id": { "type": "string", "readOnly": true },
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^[A-Za-z ]+$",
+            "example": "Milo"
+          },
+          "secret": { "type": "string", "writeOnly": true },
+          "nickname": { "type": "string", "nullable": true, "default": null },
+          "legacy": { "type": "boolean", "deprecated": true, "default": false },
+          "callbackUrl": { "type": "string", "format": "uri" }
+        },
+        "additionalProperties": false,
+        "minProperties": 1,
+        "maxProperties": 10,
+        "example": { "id": "item-1", "name": "Milo" },
+        "externalDocs": { "url": "https://example.com/items" },
+        "xml": { "name": "item", "namespace": "https://example.com/xml", "prefix": "api" },
+        "x-domain": "catalog"
+      },
+      "Constraints": {
+        "type": "object",
+        "properties": {
+          "score": {
+            "type": "number",
+            "format": "double",
+            "multipleOf": 0.5,
+            "minimum": 0,
+            "maximum": 10,
+            "exclusiveMinimum": true,
+            "exclusiveMaximum": true,
+            "default": 5
+          },
+          "count": { "type": "integer", "format": "int64", "minimum": 0 },
+          "ratio": { "type": "number", "format": "float" },
+          "small": { "type": "integer", "format": "int32" },
+          "bytes": { "type": "string", "format": "byte" },
+          "date": { "type": "string", "format": "date" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "password": { "type": "string", "format": "password" },
+          "custom": { "type": "string", "format": "catalog-code" },
+          "labels": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": { "type": "string", "enum": ["red", "blue"] },
+            "xml": { "name": "labels", "wrapped": true }
+          },
+          "attribute": { "type": "string", "xml": { "name": "code", "attribute": true } },
+          "state": { "type": "integer", "enum": [0, 1] },
+          "optionalChoice": { "type": "string", "nullable": true, "enum": ["yes", null] },
+          "dictionary": { "type": "object", "additionalProperties": { "type": "string" } },
+          "free": { "type": "object", "additionalProperties": true },
+          "notEmpty": { "type": "string", "not": { "enum": [""] } }
+        }
+      },
+      "Cat": {
+        "type": "object",
+        "required": ["kind", "lives"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["cat"] },
+          "lives": { "type": "integer" }
+        }
+      },
+      "Dog": {
+        "type": "object",
+        "required": ["kind", "barks"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["dog"] },
+          "barks": { "type": "boolean" }
+        }
+      },
+      "Pet": {
+        "oneOf": [{ "$ref": "#/components/schemas/Cat" }, { "$ref": "#/components/schemas/Dog" }],
+        "discriminator": {
+          "propertyName": "kind",
+          "mapping": { "cat": "#/components/schemas/Cat", "dog": "#/components/schemas/Dog" }
+        }
+      },
+      "Combined": {
+        "allOf": [
+          { "$ref": "#/components/schemas/Item" },
+          { "type": "object", "properties": { "revision": { "type": "integer" } } }
+        ]
+      },
+      "SearchResult": {
+        "anyOf": [
+          { "$ref": "#/components/schemas/Item" },
+          { "$ref": "#/components/schemas/Problem" }
+        ]
+      },
+      "Problem": {
+        "type": "object",
+        "required": ["message"],
+        "properties": { "message": { "type": "string" } }
+      },
+      "ItemList": { "type": "array", "items": { "$ref": "#/components/schemas/Item" } },
+      "ItemAlias": { "$ref": "#/components/schemas/Item" }
+    },
+    "responses": {
+      "ItemResponse": {
+        "description": "The requested item",
+        "headers": {
+          "ETag": { "$ref": "#/components/headers/ETag" },
+          "X-Metadata": {
+            "description": "Structured response metadata",
+            "content": {
+              "application/json": {
+                "schema": { "type": "object", "properties": { "cached": { "type": "boolean" } } }
+              }
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Item" },
+            "examples": { "sample": { "$ref": "#/components/examples/ItemExample" } }
+          },
+          "application/xml": {
+            "schema": { "$ref": "#/components/schemas/Item" },
+            "example": "<item><name>Milo</name></item>"
+          }
+        },
+        "links": {
+          "self": { "$ref": "#/components/links/ReadAgain" },
+          "operationReference": {
+            "operationRef": "#/paths/~1items~1{id}/get",
+            "parameters": { "id": "$request.path.id", "locale": "$request.query.locale" },
+            "description": "Use the original request context"
+          }
+        }
+      }
+    },
+    "parameters": {
+      "ItemId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "style": "simple",
+        "explode": false,
+        "schema": { "type": "string" }
+      },
+      "JsonQuery": {
+        "name": "json",
+        "in": "query",
+        "content": {
+          "application/json": {
+            "schema": { "type": "object", "properties": { "active": { "type": "boolean" } } },
+            "examples": {
+              "active": {
+                "summary": "Active only",
+                "description": "A structured query parameter",
+                "value": { "active": true }
+              }
+            }
+          }
+        }
+      }
+    },
+    "examples": {
+      "Colors": {
+        "summary": "Two colors",
+        "description": "A reusable array example",
+        "value": ["red", "blue"]
+      },
+      "LiteralReference": {
+        "summary": "Reference-like keys in arbitrary example data",
+        "value": {
+          "$ref": "this-is-example-data-not-a-reference",
+          "nested": { "keep": [false, null, 0] }
+        }
+      },
+      "ItemExample": { "summary": "An item", "value": { "id": "item-1", "name": "Milo" } },
+      "ExternalItem": {
+        "summary": "External example",
+        "externalValue": "https://example.com/examples/item.json"
+      }
+    },
+    "requestBodies": {
+      "ItemBody": {
+        "description": "Item input",
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": { "$ref": "#/components/schemas/Item" },
+            "example": {
+              "name": "Milo",
+              "secret": "token",
+              "callbackUrl": "https://example.com/hooks"
+            }
+          }
+        }
+      }
+    },
+    "headers": {
+      "ETag": {
+        "description": "Entity version",
+        "required": false,
+        "deprecated": false,
+        "style": "simple",
+        "explode": false,
+        "schema": { "type": "string" },
+        "examples": { "first": { "value": "v1" } }
+      }
+    },
+    "securitySchemes": {
+      "ApiKey": { "type": "apiKey", "description": "API key", "name": "X-API-Key", "in": "header" },
+      "QueryKey": { "type": "apiKey", "name": "key", "in": "query" },
+      "CookieKey": { "type": "apiKey", "name": "auth", "in": "cookie" },
+      "Basic": { "type": "http", "scheme": "basic", "description": "HTTP Basic authentication" },
+      "Bearer": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "Caller-supplied bearer token"
+      },
+      "OAuth": {
+        "type": "oauth2",
+        "description": "Authorization metadata for all four OAuth flows",
+        "flows": {
+          "implicit": {
+            "authorizationUrl": "https://example.com/authorize",
+            "refreshUrl": "https://example.com/refresh",
+            "scopes": { "read:items": "Read items" }
+          },
+          "password": {
+            "tokenUrl": "https://example.com/token",
+            "refreshUrl": "https://example.com/refresh",
+            "scopes": { "read:items": "Read items" }
+          },
+          "clientCredentials": {
+            "tokenUrl": "https://example.com/token",
+            "refreshUrl": "https://example.com/refresh",
+            "scopes": { "write:items": "Write items" }
+          },
+          "authorizationCode": {
+            "authorizationUrl": "https://example.com/authorize",
+            "tokenUrl": "https://example.com/token",
+            "refreshUrl": "https://example.com/refresh",
+            "scopes": { "read:items": "Read items", "write:items": "Write items" }
+          }
+        }
+      },
+      "BearerAlias": { "$ref": "#/components/securitySchemes/Bearer" },
+      "OpenID": {
+        "type": "openIdConnect",
+        "description": "OpenID discovery metadata",
+        "openIdConnectUrl": "https://example.com/.well-known/openid-configuration"
+      }
+    },
+    "links": {
+      "ReadAgain": {
+        "operationId": "readItem",
+        "parameters": {
+          "id": "$response.body#/id",
+          "locale": "en",
+          "q": "$url",
+          "X-Trace": "$response.header.ETag",
+          "session": "$request.header.Cookie"
+        },
+        "description": "Runtime expressions are retained as metadata",
+        "server": { "url": "https://links.example.com" }
+      },
+      "ReplaceAfterRead": {
+        "operationId": "replaceItem",
+        "parameters": { "id": "$response.body#/id", "locale": "en" },
+        "requestBody": "$response.body"
+      },
+      "RequestSummary": {
+        "operationId": "readItem",
+        "parameters": { "id": "$statusCode", "locale": "$method", "q": "Requested {$url}" }
+      }
+    },
+    "callbacks": {
+      "OnChange": {
+        "{$request.body#/callbackUrl}": {
+          "post": {
+            "summary": "Item changed notification",
+            "operationId": "onItemChanged",
+            "requestBody": {
+              "required": true,
+              "content": {
+                "application/json": { "schema": { "$ref": "#/components/schemas/Item" } }
+              }
+            },
+            "responses": { "200": { "description": "Acknowledged" } }
+          }
+        }
+      }
+    },
+    "x-component-owner": "syntax suite"
+  },
+  "x-fixture-purpose": "Preserve descriptive OAS metadata without claiming a validator, OAuth client or callback server"
+}

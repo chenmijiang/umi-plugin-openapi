@@ -69,8 +69,11 @@ const reservedWords = new Set([
   "yield",
 ]);
 
+const generatedType = Symbol("generatedType");
+
 interface LegacySchema {
   $ref?: string;
+  [generatedType]?: string;
   type?: string;
   format?: string;
   title?: string;
@@ -84,6 +87,8 @@ interface LegacySchema {
   anyOf?: LegacySchema[];
   allOf?: LegacySchema[];
   nullable?: boolean;
+  readOnly?: boolean;
+  writeOnly?: boolean;
   additionalProperties?: boolean | LegacySchema;
 }
 
@@ -129,12 +134,15 @@ interface FileTemplate {
 interface ResponseTemplate {
   mediaType: string;
   type: string;
+  responseType?: "text" | "blob";
 }
 
 interface ServiceTemplate {
   genType: string;
   className: string;
   instanceName: string;
+  hasParameters: boolean;
+  hasFormBody: boolean;
   list: Record<string, unknown>[];
 }
 
@@ -144,6 +152,7 @@ interface TemplateParameter extends Omit<ParameterObject, "schema"> {
   isObject?: boolean;
   isComplexType?: boolean;
   alias?: string;
+  inputName?: string;
   $ref?: string;
 }
 
@@ -165,22 +174,10 @@ export interface APIDataType extends OperationObject {
 
 export type TagAPIDataType = Record<string, APIDataType[]>;
 
-export interface MappingItemType {
-  antTechApi: string;
-  popAction: string;
-  popProduct: string;
-  antTechVersion: string;
-}
-
 export interface ControllerType {
   fileName: string;
   controllerName: string;
 }
-
-export const getPath = (): string => {
-  const cwd = process.cwd();
-  return existsSync(join(cwd, "src")) ? join(cwd, "src") : cwd;
-};
 
 // 兼容C#泛型的typeLastName取法
 function getTypeLastName(typeName: string): string {
@@ -237,64 +234,94 @@ const resolveTypeName = (typeName: string): string => {
 
 function getRefName(refObject: LegacySchema): string {
   const refPaths = refObject.$ref!.split("/");
-  return resolveTypeName(refPaths[refPaths.length - 1]);
+  return resolveTypeName(
+    decodeURIComponent(refPaths[refPaths.length - 1])
+      .replace(/~1/g, "/")
+      .replace(/~0/g, "~"),
+  );
 }
 
 const escapeComment = (text: string): string =>
   text.replace(/\*\//g, "*\\/").replace(/\r\n?|\n/g, "\n * ");
 
+const escapeTemplateText = (text: string): string =>
+  text.replace(/[\\`$]/g, (character) => `\\${character}`);
+const METHODS = ["get", "put", "post", "delete", "options", "head", "patch", "trace"] as const;
+const selectMedia = (content: ContentObject = {}): string => {
+  const keys = Object.keys(content);
+  return (
+    keys.find((key) => key === "application/json") ||
+    keys.find((key) => /\+json(?:;|$)/i.test(key)) ||
+    keys[0] ||
+    ""
+  );
+};
 const defaultGetType = (
   input: unknown,
   namespace: string = "",
   describe?: (schema: LegacySchema) => string,
+  refName?: (schema: LegacySchema) => string,
 ): string => {
   const schema = input as LegacySchema | undefined;
-  const type = getNonNullableType(input, namespace, describe);
-  return schema?.nullable && type !== "null" ? `${type} | null` : type;
+  const type = getNonNullableType(input, namespace, describe, refName);
+  return schema?.nullable &&
+    schema.type &&
+    !schema.$ref &&
+    !schema.allOf?.length &&
+    !schema.oneOf?.length &&
+    !schema.anyOf?.length &&
+    (!schema.enum || schema.enum.includes(null)) &&
+    type !== "null"
+    ? `(${type}) | null`
+    : type;
 };
+
+const numberEnum = ["integer", "long", "float", "double", "number", "int", "int32", "int64"];
+const dateEnum = ["Date", "date", "dateTime", "date-time", "datetime"];
+const stringEnum = ["string", "email", "password", "url", "byte", "binary"];
 
 const getNonNullableType = (
   input: unknown,
   namespace: string,
   describe?: (schema: LegacySchema) => string,
+  refName?: (schema: LegacySchema) => string,
 ): string => {
   const schemaObject = input as LegacySchema | undefined;
-  const typeOf = (schema: unknown): string => defaultGetType(schema, namespace, describe);
+  const typeOf = (schema: unknown): string => defaultGetType(schema, namespace, describe, refName);
   if (schemaObject === undefined || schemaObject === null) {
     return "any";
   }
   if (typeof schemaObject !== "object") {
     return String(schemaObject);
   }
+  if (schemaObject[generatedType])
+    return [namespace, schemaObject[generatedType]].filter(Boolean).join(".");
   if (schemaObject.$ref) {
-    return [namespace, getRefName(schemaObject)].filter((s) => s).join(".");
+    return [namespace, refName ? refName(schemaObject) : getRefName(schemaObject)]
+      .filter(Boolean)
+      .join(".");
+  }
+  const composition = [schemaObject.allOf, schemaObject.oneOf, schemaObject.anyOf];
+  if (composition.some((items) => items?.length)) {
+    const { allOf, oneOf, anyOf, nullable: _nullable, ...own } = schemaObject;
+    if (Array.isArray(own.required) && own.required.length)
+      own.properties = {
+        ...Object.fromEntries(own.required.map((key) => [key, {}])),
+        ...own.properties,
+      };
+    const parts: string[] = [];
+    if (allOf?.length) parts.push(...allOf.map((item) => `(${typeOf(item)})`));
+    if (oneOf?.length) parts.push(`(${oneOf.map((item) => `(${typeOf(item)})`).join(" | ")})`);
+    if (anyOf?.length) parts.push(`(${anyOf.map((item) => `(${typeOf(item)})`).join(" | ")})`);
+    if (own.type || own.properties || own.additionalProperties !== undefined || own.enum)
+      parts.push(`(${typeOf({ ...own, nullable: schemaObject.nullable })})`);
+    return parts.join(" & ");
   }
 
   let type = schemaObject.type;
 
-  const numberEnum = [
-    "integer",
-    "long",
-    "float",
-    "double",
-    "number",
-    "int",
-    "float",
-    "double",
-    "int32",
-    "int64",
-  ];
-
-  const dateEnum = ["Date", "date", "dateTime", "date-time", "datetime"];
-
-  const stringEnum = ["string", "email", "password", "url", "byte", "binary"];
-
   if (type === "null") {
     return "null";
-  }
-
-  if (numberEnum.includes(schemaObject.format || "")) {
-    type = "number";
   }
 
   if (schemaObject.enum) {
@@ -333,25 +360,10 @@ const getNonNullableType = (
 
   if (type === "enum") {
     return Array.isArray(schemaObject.enum)
-      ? Array.from(
-          new Set(
-            schemaObject.enum.map((v) =>
-              typeof v === "string" ? `"${v.replace(/"/g, '"')}"` : defaultGetType(v),
-            ),
-          ),
-        ).join(" | ")
+      ? Array.from(new Set(schemaObject.enum.map((v) => JSON.stringify(v)))).join(" | ")
       : "string";
   }
 
-  if (schemaObject.oneOf && schemaObject.oneOf.length) {
-    return schemaObject.oneOf.map((item) => typeOf(item)).join(" | ");
-  }
-  if (schemaObject.anyOf && schemaObject.anyOf.length) {
-    return schemaObject.anyOf.map((item) => typeOf(item)).join(" | ");
-  }
-  if (schemaObject.allOf && schemaObject.allOf.length) {
-    return `(${schemaObject.allOf.map((item) => `(${typeOf(item)})`).join(" & ")})`;
-  }
   if (
     schemaObject.type === "object" ||
     schemaObject.properties ||
@@ -360,40 +372,48 @@ const getNonNullableType = (
     const additional = schemaObject.additionalProperties;
     const valueType = additional && typeof additional === "object" ? typeOf(additional) : "unknown";
     const dictionaryType = valueType === "any" ? "unknown" : valueType;
-    const indexSignature = additional ? `[key: string]: ${dictionaryType}; ` : "";
-    if (!Object.keys(schemaObject.properties || {}).length) {
+    const properties = schemaObject.properties || {};
+    const propertyKeys = Object.keys(properties);
+    if (!propertyKeys.length) {
       return `Record<string, ${additional === false ? "never" : dictionaryType}>`;
     }
-    return `{\n${Object.keys(schemaObject.properties || {})
-      .map((key) => {
-        let required = false;
-        if (typeof schemaObject.required === "boolean" && schemaObject.required) {
-          required = true;
-        }
-        if (Array.isArray(schemaObject.required) && schemaObject.required.includes(key)) {
-          required = true;
-        }
-        if (
-          "required" in (schemaObject.properties?.[key] || {}) &&
-          schemaObject.properties?.[key]?.required
-        ) {
-          required = true;
-        }
+    const requiredKeys = Array.isArray(schemaObject.required)
+      ? new Set(schemaObject.required)
+      : undefined;
+    const propertyTypes = additional
+      ? propertyKeys.map((key) => typeOf(properties[key]))
+      : undefined;
+    let indexSignature = "";
+    if (propertyTypes) {
+      const hasOptional = propertyKeys.some(
+        (key) => !requiredKeys?.has(key) || properties[key].readOnly || properties[key].writeOnly,
+      );
+      const indexTypes = [
+        ...new Set([dictionaryType, ...propertyTypes, ...(hasOptional ? ["undefined"] : [])]),
+      ];
+      indexSignature = `[key: string]: ${indexTypes.join(" | ")}; `;
+    }
+    return `{\n${propertyKeys
+      .map((key, index) => {
+        let required = schemaObject.required === true || !!requiredKeys?.has(key);
+        if (schemaObject.properties?.[key]?.readOnly || schemaObject.properties?.[key]?.writeOnly)
+          required = false;
         /**
          * 将类型属性变为字符串，兼容错误格式如：
          * 3d_tile(数字开头)等错误命名，
          * 在后面进行格式化的时候会将正确的字符串转换为正常形式，
          * 错误的继续保留字符串。
          * */
-        const property = schemaObject.properties![key];
+        const property = properties[key];
         const description = describe
           ? describe(property)
           : escapeComment([property.title, property.description].filter(Boolean).join(" "));
-        return `${description ? `/** ${description} */\n` : ""}${JSON.stringify(key)}${required ? "" : "?"}: ${typeOf(property)};\n`;
+        const propertyType = propertyTypes ? propertyTypes[index] : typeOf(property);
+        return `${description ? `/** ${description} */\n` : ""}${JSON.stringify(key)}${required ? "" : "?"}: ${propertyType};\n`;
       })
       .join("")}${indexSignature}}`;
   }
-  return "any";
+  return "unknown";
 };
 
 const DEFAULT_SCHEMA: LegacySchema = {
@@ -424,17 +444,18 @@ function defaultGetFileTag(
       ];
 }
 class ServiceGenerator {
-  protected apiData: TagAPIDataType = {};
+  protected apiData: TagAPIDataType = Object.create(null);
 
   protected classNameList: ControllerType[] = [];
-
-  protected version: string;
-
-  protected mappings: MappingItemType[] = [];
 
   protected finalPath: string;
 
   private hasFormattingError = false;
+  private directionNames = new Map<string, string>();
+  private schemaNames = new Map<string, string>();
+  private parameterNames = new Map<string, string>();
+  private namesAllocated = false;
+  private pathBasePrefix: string;
 
   protected config: GenerateServiceProps & { projectName: string; templatesFolder: string };
   protected openAPIData: OpenAPIObject;
@@ -454,14 +475,29 @@ class ServiceGenerator {
     } else {
       this.openAPIData = openAPIData;
     }
-    const { info } = this.openAPIData;
-    const basePath = "";
-    this.version = info.version;
     const hookCustomFileNames = this.config.hook?.customFileNames || defaultGetFileTag;
     Object.keys(this.openAPIData.paths || {}).forEach((p) => {
-      const pathItem: PathItemObject = this.openAPIData.paths[p];
-      (["get", "put", "post", "delete", "patch"] as const).forEach((method) => {
-        const operationObject = pathItem[method];
+      if (!p.startsWith("/")) return;
+      const pathItem = this.resolveRefObject<PathItemObject>(this.openAPIData.paths[p]);
+      this.openAPIData.paths[p] = pathItem;
+      METHODS.forEach((method) => {
+        const original = pathItem[method];
+        const parameters = new Map<string, ParameterObject>();
+        [...(pathItem.parameters || []), ...(original?.parameters || [])].forEach((item) => {
+          const parameter = this.resolveRefObject<ParameterObject>(item);
+          if (
+            parameter.in === "header" &&
+            /^(accept|content-type|authorization)$/i.test(parameter.name)
+          )
+            return;
+          parameters.set(`${parameter.in}:${parameter.name}`, parameter);
+        });
+        const operationObject = original && {
+          ...original,
+          parameters: [...parameters.values()],
+          servers: original.servers || pathItem.servers || this.openAPIData.servers,
+        };
+        if (operationObject) pathItem[method] = operationObject;
         if (!operationObject) {
           return;
         }
@@ -480,13 +516,16 @@ class ServiceGenerator {
             this.apiData[tag] = [];
           }
           this.apiData[tag].push({
-            path: `${basePath}${p}`,
+            path: p,
             method,
             ...operationObject,
           });
         });
       });
     });
+    this.pathBasePrefix = this.getBasePrefix(
+      Object.keys(this.openAPIData.paths || {}).filter((path) => path.startsWith("/")),
+    );
   }
 
   public genFile(): void {
@@ -494,6 +533,9 @@ class ServiceGenerator {
     const basePath = this.config.serversPath || "./src/service";
     const finalPath = join(basePath, this.config.projectName);
     this.finalPath = finalPath;
+    const declarations = this.getInterfaceTP();
+    this.classNameList = [];
+    const services = this.getServiceTP();
     try {
       for (const relativePath of globSync("**/*", { cwd: finalPath })) {
         const filePath = join(finalPath, relativePath);
@@ -510,7 +552,7 @@ class ServiceGenerator {
         namespace: this.config.namespace,
         nullable: this.config.nullable,
         // namespace: 'API',
-        list: this.getInterfaceTP(),
+        list: declarations,
         disableTypeCheck: false,
         declareType: this.config.declareType || "type",
         equalSymbol: (this.config.declareType || "type") === "type" ? "=" : "",
@@ -522,11 +564,11 @@ class ServiceGenerator {
         fs.mkdirSync(typesDir, { recursive: true });
       }
       // 按tag生成多个类型声明文件
-      this.genTypeFilesByTag();
+      this.genTypeFilesByTag(declarations);
     }
     // 生成 controller 文件
     // 生成 service 统计
-    this.getServiceTP().forEach((tp) => {
+    services.forEach((tp) => {
       // 根据当前数据源类型选择恰当的 controller 模版
       const template = "serviceController";
       this.genFileFromTemplate(this.getFinalFileName(`${tp.className}.ts`), template, {
@@ -556,50 +598,66 @@ class ServiceGenerator {
     }
   }
 
-  public concatOrNull = <T>(...arrays: (T[] | null | undefined)[]): T[] | null => {
-    const c = ([] as T[]).concat(...arrays.filter((array): array is T[] => Array.isArray(array)));
-    return c.length > 0 ? c : null;
-  };
-
   public getFuncationName(data: APIDataType): string {
-    // 获取路径相同部分
-    const pathBasePrefix = this.getBasePrefix(Object.keys(this.openAPIData.paths));
     return this.config.hook && this.config.hook.customFunctionName
       ? this.config.hook.customFunctionName(data)
       : data.operationId
         ? this.resolveFunctionName(stripDot(data.operationId), data.method)
-        : data.method + this.genDefaultFunctionName(data.path, pathBasePrefix);
+        : data.method + this.genDefaultFunctionName(data.path, this.pathBasePrefix);
   }
 
   public getTypeName(data: APIDataType): string {
-    const namespace = this.config.namespace ? `${this.config.namespace}.` : "";
-    const typeName = this.config?.hook?.customTypeName?.(data) || this.getFuncationName(data);
-
-    return resolveTypeName(`${namespace}${typeName ?? data.operationId}Params`);
+    this.allocateTypeNames();
+    return this.parameterNames.get(JSON.stringify([data.path, data.method]))!;
   }
 
   public getServiceTP(): ServiceTemplate[] {
     return Object.keys(this.apiData)
       .map((tag, index) => {
         // functionName tag 级别防重
-        const tmpFunctionRD: Record<string, number> = {};
+        const tmpFunctionRD = new Set([
+          "encodeParameter",
+          "parameterPairs",
+          "serializeParameter",
+          "serializeParameters",
+          "appendQuery",
+          "serializeFormBody",
+          "OpenAPIParameter",
+          "OpenAPIEncoding",
+        ]);
 
         const genParams = this.apiData[tag]
-          .filter(
-            (api) =>
-              // 暂不支持变量
-              !api.path.includes("${"),
-          )
           .map((api) => {
             const newApi = api;
             try {
               const allParams = this.getParamsTP(newApi.parameters, newApi.path);
               const body = this.getBodyTP(newApi.requestBody);
               const response = this.getResponseTP(newApi.responses);
+              const requestBody = newApi.requestBody
+                ? this.resolveRefObject<RequestBodyObject>(newApi.requestBody)
+                : undefined;
+              const encoding = requestBody?.content?.[body?.mediaType || ""]?.encoding || {};
+              for (const [name, settings] of Object.entries(encoding)) {
+                if (
+                  settings.headers &&
+                  Object.keys(settings.headers).some((header) => !/^content-type$/i.test(header))
+                )
+                  console.warn(
+                    `[openAPI]: Request encoding.headers for ${name} cannot be supplied by the standard request transport; use a custom request implementation for per-part headers`,
+                  );
+              }
+              const parameterDefinitions = Object.values(allParams)
+                .flat()
+                .map((parameter) => ({
+                  name: parameter.name,
+                  inputName: parameter.inputName,
+                  in: parameter.in,
+                  style: parameter.style,
+                  explode: parameter.explode,
+                  allowReserved: parameter.allowReserved,
+                  contentType: parameter.content ? selectMedia(parameter.content) : undefined,
+                }));
 
-              // let { file, ...params } = allParams || {}; // I dont't know if 'file' is valid parameter, maybe it's safe to remove it
-              // const newfile = this.getFileTP(newApi.requestBody);
-              // file = this.concatOrNull(file, newfile);
               const params = allParams || {};
               const file = this.getFileTP(newApi.requestBody);
 
@@ -609,28 +667,26 @@ class ServiceGenerator {
               }
 
               let functionName = this.getFuncationName(newApi);
+              if (this.config.isCamelCase) functionName = camelCase(functionName);
+              const baseName = functionName;
+              let suffix = 2;
+              while (tmpFunctionRD.has(functionName)) functionName = `${baseName}_${suffix++}`;
+              tmpFunctionRD.add(functionName);
 
-              if (functionName && tmpFunctionRD[functionName]) {
-                functionName = `${functionName}_${(tmpFunctionRD[functionName] += 1)}`;
-              } else if (functionName) {
-                tmpFunctionRD[functionName] = 1;
-              }
-
-              let formattedPath = newApi.path.replace(
-                /:([^/]*)|{([^}]*)}/gi,
-                (_, str, str2) => `$\{${str || str2}}`,
-              );
+              let formattedPath = newApi.path
+                .split(/(\{[^{}]+\})/g)
+                .map((part) => {
+                  if (!part.startsWith("{") || !part.endsWith("}")) return escapeTemplateText(part);
+                  const index = (params.path || []).findIndex(
+                    (parameter) => parameter.name === part.slice(1, -1),
+                  );
+                  return "${param" + index + "}";
+                })
+                .join("");
               if (newApi.extensions && newApi.extensions["x-antTech-description"]) {
                 const { extensions } = newApi;
-                const { apiName, antTechVersion, productCode, antTechApiName } =
-                  extensions["x-antTech-description"]!;
+                const { antTechVersion, antTechApiName } = extensions["x-antTech-description"]!;
                 formattedPath = antTechApiName || formattedPath;
-                this.mappings.push({
-                  antTechApi: formattedPath,
-                  popAction: apiName,
-                  popProduct: productCode,
-                  antTechVersion,
-                });
                 newApi.antTechVersion = antTechVersion;
               }
 
@@ -639,11 +695,6 @@ class ServiceGenerator {
                 ...ele,
                 alias: `param${index}`,
               }));
-              if (escapedPathParams.length) {
-                escapedPathParams.forEach((param) => {
-                  formattedPath = formattedPath.replace(`$\{${param.name}}`, `$\{${param.alias}}`);
-                });
-              }
 
               const finalParams: Record<string, TemplateParameter[]> =
                 escapedPathParams && escapedPathParams.length
@@ -660,7 +711,12 @@ class ServiceGenerator {
 
               const getPrefixPath = () => {
                 if (!this.config.apiPrefix) {
-                  return formattedPath;
+                  const server = newApi.servers?.[0];
+                  const base =
+                    server?.url.replace(/\{([^{}]+)\}/g, (_match, name: string) =>
+                      String(server.variables?.[name]?.default ?? ""),
+                    ) || "";
+                  return `${escapeTemplateText(base.replace(/\/$/, ""))}${formattedPath}`;
                 }
                 // 静态 apiPrefix
                 const prefix =
@@ -681,7 +737,7 @@ class ServiceGenerator {
                   this.config.dedupeApiPrefix &&
                   (prefix.startsWith("'") || prefix.startsWith('"') || prefix.startsWith("`"))
                 ) {
-                  const finalPrefix = prefix.slice(1, prefix.length - 1);
+                  const finalPrefix = escapeTemplateText(prefix.slice(1, prefix.length - 1));
                   if (
                     formattedPath.startsWith(finalPrefix) ||
                     formattedPath.startsWith(`/${finalPrefix}`)
@@ -696,7 +752,9 @@ class ServiceGenerator {
 
               return {
                 ...newApi,
-                functionName: this.config.isCamelCase ? camelCase(functionName) : functionName,
+                parameterDefinitions,
+                encoding,
+                functionName,
                 typeName: this.getTypeName(newApi),
                 path: getPrefixPath(),
                 pathInComment: escapeComment(formattedPath.replace(/\*/g, "&#42;")),
@@ -751,6 +809,10 @@ class ServiceGenerator {
           genType: "ts",
           className,
           instanceName: `${fileName[0]?.toLowerCase()}${fileName.substr(1)}`,
+          hasParameters: genParams.some((api) => api.hasParams),
+          hasFormBody: genParams.some(
+            (api) => api.hasFormData || api.body?.mediaType === "application/x-www-form-urlencoded",
+          ),
           list: genParams,
         };
       })
@@ -770,31 +832,47 @@ class ServiceGenerator {
     if (typeof reqContent !== "object" || (reqContent && Object.keys(reqContent).length === 0)) {
       return null;
     }
-    let mediaType = Object.keys(reqContent)[0];
-
-    const schema = (reqContent[mediaType].schema || DEFAULT_SCHEMA) as LegacySchema;
+    let mediaType = selectMedia(reqContent);
+    const sourceSchema = (reqContent[mediaType].schema || {}) as LegacySchema;
+    const resolvedSchema =
+      sourceSchema.$ref && mediaType === "multipart/form-data"
+        ? this.resolveRefObject<LegacySchema>(sourceSchema)
+        : sourceSchema;
+    const schema = this.directionalSchema(resolvedSchema, "Input");
 
     if (mediaType === "*/*") {
       mediaType = "";
     }
     // 如果 requestBody 有 required 属性，则正常展示；如果没有，默认非必填
     const required = reqBody.required === true;
+    if (
+      mediaType &&
+      !/(?:\/|\+)json(?:;|$)/i.test(mediaType) &&
+      !["multipart/form-data", "application/x-www-form-urlencoded"].includes(mediaType)
+    ) {
+      return {
+        mediaType,
+        required,
+        type: /^(?:text\/)|xml(?:;|$)/i.test(mediaType) ? "string" : "Blob | ArrayBuffer | string",
+      };
+    }
     if (schema.type === "object" && schema.properties && !schema.nullable) {
       const propertiesList = Object.keys(schema.properties)
         .map((p) => {
           if (
             schema.properties &&
             schema.properties[p] &&
-            !["binary", "base64"].includes(schema.properties[p].format || "") &&
             !(
-              ["string[]", "array"].includes(schema.properties[p].type || "") &&
-              ["binary", "base64"].includes(
-                (schema.properties[p].items as LegacySchema).format || "",
-              )
+              mediaType === "multipart/form-data" &&
+              (["binary", "base64"].includes(schema.properties[p].format || "") ||
+                (schema.properties[p].type === "array" &&
+                  ["binary", "base64"].includes(
+                    (schema.properties[p].items as LegacySchema)?.format || "",
+                  )))
             )
           ) {
             return {
-              key: p,
+              key: JSON.stringify(p),
               schema: {
                 ...schema.properties[p],
                 type: this.getType(schema.properties[p], this.config.namespace),
@@ -825,7 +903,7 @@ class ServiceGenerator {
     const reqBody = this.resolveRefObject<RequestBodyObject>(
       requestBody as RequestBodyObject | ReferenceObject,
     );
-    if (reqBody && reqBody.content && reqBody.content["multipart/form-data"]) {
+    if (reqBody?.content && selectMedia(reqBody.content) === "multipart/form-data") {
       const ret = this.resolveFileTP(reqBody.content["multipart/form-data"].schema);
       return ret.length > 0 ? ret : null;
     }
@@ -863,58 +941,35 @@ class ServiceGenerator {
   }
 
   public getResponseTP(responses: ResponsesObject = {}): ResponseTemplate {
-    const { components } = this.openAPIData;
-    const response: ResponseObject | undefined =
-      responses &&
-      this.resolveRefObject<ResponseObject | undefined>(
-        responses.default || responses["200"] || responses["201"],
-      );
-    const defaultResponse = {
-      mediaType: "*/*",
-      type: "any",
-    };
-    if (!response) {
-      return defaultResponse;
-    }
-    const resContent: ContentObject | undefined = response.content;
-    const resContentMediaTypes = Object.keys(resContent || {});
-    const mediaType = resContentMediaTypes.includes("application/json")
-      ? "application/json"
-      : resContentMediaTypes[0]; // 优先使用 application/json
-    if (typeof resContent !== "object" || !mediaType) {
-      return defaultResponse;
-    }
-    let schema = (resContent[mediaType].schema || DEFAULT_SCHEMA) as LegacySchema;
-
-    if (schema.$ref) {
-      const refPaths = schema.$ref.split("/");
-      const refName = refPaths[refPaths.length - 1];
-      const childrenSchema = components?.schemas?.[refName] as LegacySchema | undefined;
-      if (
-        childrenSchema?.type === "object" &&
-        "properties" in childrenSchema &&
-        this.config.dataFields
-      ) {
+    const successes = Object.keys(responses).filter((key) => /^2(?:\d\d|XX)$/i.test(key));
+    const keys = successes.length ? successes : responses.default ? ["default"] : [];
+    let mediaType = "*/*";
+    const types = keys.map((key) => {
+      const response = this.resolveRefObject<ResponseObject>(responses[key]);
+      const media = selectMedia(response.content);
+      if (!media || key === "204") return "void";
+      mediaType = media;
+      if (!/(?:\/|\+)json(?:;|$)/i.test(media))
+        return /^(?:text\/)|xml(?:;|$)/i.test(media) ? "string" : "Blob";
+      let schema = response.content![media].schema as LegacySchema | undefined;
+      if (!schema) return "unknown";
+      if (schema.$ref && this.config.dataFields) {
+        const resolved = this.resolveRefObject<LegacySchema>(schema);
         schema =
-          this.config.dataFields
-            .map((field) => childrenSchema.properties?.[field])
-            .filter(Boolean)?.[0] ||
-          (resContent[mediaType].schema as LegacySchema | undefined) ||
-          DEFAULT_SCHEMA;
+          this.config.dataFields.map((field) => resolved.properties?.[field]).find(Boolean) ||
+          schema;
       }
-    }
-
-    if (schema.properties) {
-      const properties = schema.properties;
-      Object.keys(properties).map((fieldName) => {
-        properties[fieldName].required = Array.isArray(schema.required)
-          ? schema.required.includes(fieldName)
-          : false;
-      });
-    }
+      return `(${this.getType(this.directionalSchema(schema, "Output"), this.config.namespace)})`;
+    });
     return {
       mediaType,
-      type: this.getType(schema, this.config.namespace),
+      type: [...new Set(types)].join(" | ") || "unknown",
+      responseType:
+        types.every((type) => type === "string" || type === "void") && types.includes("string")
+          ? "text"
+          : types.every((type) => type === "Blob" || type === "void") && types.includes("Blob")
+            ? "blob"
+            : undefined,
     };
   }
 
@@ -925,7 +980,7 @@ class ServiceGenerator {
     const templateParams: Record<string, TemplateParameter[]> = {};
 
     if (parameters && parameters.length) {
-      ["query", "path", "cookie" /* , 'file' */].forEach((source) => {
+      ["query", "path", "cookie", "header"].forEach((source) => {
         // Possible values are "query", "header", "path" or "cookie". (https://swagger.io/specification/)
         const params = parameters
           .map((p) => this.resolveRefObject<TemplateParameter>(p))
@@ -945,7 +1000,7 @@ class ServiceGenerator {
               ...p,
               isObject: isDirectObject || isRefObject,
               description: escapeComment(p.description ?? ""),
-              type: this.getType(p.schema || DEFAULT_SCHEMA, this.config.namespace),
+              type: this.getType(this.parameterSchema(p), this.config.namespace),
             };
           });
 
@@ -956,7 +1011,7 @@ class ServiceGenerator {
     }
 
     if (path && path.length > 0) {
-      const regex = /\{(\w+)\}/g;
+      const regex = /\{([^{}]+)\}/g;
       templateParams.path = templateParams.path || [];
       let match = null;
       while ((match = regex.exec(path))) {
@@ -973,98 +1028,202 @@ class ServiceGenerator {
       if (!templateParams.path.length) delete templateParams.path;
     }
 
+    const all = Object.values(templateParams).flat();
+    const used = new Set(
+      all
+        .filter(
+          (parameter) =>
+            !all.some((other) => other.name === parameter.name && other.in !== parameter.in),
+        )
+        .map((parameter) => parameter.name),
+    );
+    all.forEach((parameter) => {
+      if (!all.some((other) => other.name === parameter.name && other.in !== parameter.in)) {
+        parameter.inputName = parameter.name;
+        return;
+      }
+      const base = `${parameter.in}.${parameter.name}`;
+      let inputName = base;
+      let suffix = 2;
+      while (used.has(inputName)) inputName = `${base}_${suffix++}`;
+      used.add(inputName);
+      parameter.inputName = inputName;
+    });
     return templateParams;
   }
 
-  public getInterfaceTP(): InterfaceTemplate[] | undefined {
-    const { components } = this.openAPIData;
-    const data: InterfaceTemplate[][] | undefined =
-      components &&
-      components.schemas &&
-      [components.schemas].map((defines) => {
-        return Object.keys(defines).map((typeName) => {
-          const resolved = this.resolveObject(defines[typeName]);
-          const result = typeof resolved === "string" ? {} : resolved;
-
-          const getDefinesType = () => {
-            if (result.type) {
-              return result.type;
-            }
-            return "Record<string, unknown>";
-          };
-          return {
-            typeName: resolveTypeName(typeName),
-            type: getDefinesType(),
-            parent: result.parent,
-            props: result.props || [],
-            isEnum: result.isEnum,
-            nullable: (defines[typeName] as LegacySchema).nullable,
-          };
+  public getInterfaceTP(): InterfaceTemplate[] {
+    const result: InterfaceTemplate[] = [];
+    for (const [name, schema] of Object.entries(this.openAPIData.components?.schemas || {})) {
+      for (const direction of ["", "Input", "Output"] as const) {
+        const value = direction
+          ? this.directionalSchema(schema as LegacySchema, direction)
+          : schema;
+        const resolved: ResolvedSchema =
+          !direction &&
+          (schema as LegacySchema).enum &&
+          !(schema as LegacySchema).enum!.some(
+            (value) => typeof value === "boolean" || value === null,
+          ) &&
+          this.config.enumStyle === "enum"
+            ? this.resolveEnumObject(schema as LegacySchema)
+            : (this.config.declareType === "interface" || this.config.nullable) &&
+                !(value as LegacySchema).$ref &&
+                !(value as LegacySchema).nullable &&
+                !(value as LegacySchema).allOf?.length &&
+                !(value as LegacySchema).oneOf?.length &&
+                !(value as LegacySchema).anyOf?.length &&
+                !(value as LegacySchema).enum &&
+                (value as LegacySchema).additionalProperties === undefined &&
+                Object.keys((value as LegacySchema).properties || {}).length > 0 &&
+                [undefined, "object"].includes((value as LegacySchema).type)
+              ? this.resolveProperties(value as LegacySchema)
+              : { type: this.getType(value) };
+        result.push({
+          typeName: direction
+            ? this.directionName(this.schemaTypeName(name), direction)
+            : this.schemaTypeName(name),
+          type: resolved.type || "unknown",
+          props: resolved.props || [],
+          isEnum: resolved.isEnum,
         });
+      }
+    }
+    const seen = new Set<string>();
+    for (const api of Object.values(this.apiData).flat()) {
+      const typeName = this.getTypeName(api);
+      if (seen.has(typeName)) continue;
+      seen.add(typeName);
+      const parameters = Object.values(this.getParamsTP(api.parameters, api.path)).flat();
+      if (!parameters.length) continue;
+      result.push({
+        typeName,
+        type: "Record<string, unknown>",
+        props: [
+          parameters.map((p) => ({
+            name: p.inputName,
+            desc: p.description,
+            required: p.required,
+            type: this.getType(this.parameterSchema(p)),
+          })),
+        ],
       });
+    }
+    return result.sort((a, b) => a.typeName.localeCompare(b.typeName));
+  }
 
-    // 强行替换掉请求参数params的类型，生成方法对应的 xxxxParams 类型
-    Object.keys(this.openAPIData.paths || {}).forEach((p) => {
-      const pathItem: PathItemObject = this.openAPIData.paths[p];
-      (["get", "put", "post", "delete", "patch"] as const).forEach((method) => {
-        const operationObject = pathItem[method];
-        if (!operationObject) {
-          return;
-        }
-        operationObject.parameters = operationObject.parameters
-          ?.map((item) => this.resolveRefObject<ParameterObject>(item))
-          .filter((item) => item.in !== "header");
-        const props: TemplateProperty[] = [];
-        if (operationObject.parameters) {
-          operationObject.parameters.forEach((item) => {
-            const parameter = item as ParameterObject;
-            props.push({
-              desc: escapeComment(parameter.description ?? ""),
-              name: parameter.name,
-              required: parameter.required,
-              type: this.getType(parameter.schema),
-            });
-          });
-        }
-        // parameters may be in path
-        if (pathItem.parameters) {
-          pathItem.parameters.forEach((item) => {
-            const parameter = this.resolveRefObject<ParameterObject>(item);
-            props.push({
-              desc: escapeComment(parameter.description ?? ""),
-              name: parameter.name,
-              required: parameter.required,
-              type: this.getType(parameter.schema),
-            });
-          });
-        }
+  private parameterSchema(parameter: ParameterObject): unknown {
+    const media = selectMedia(parameter.content);
+    if (media && !/(?:\/|\+)json(?:;|$)/i.test(media)) return { type: "string" };
+    return parameter.schema || parameter.content?.[media]?.schema || {};
+  }
 
-        if (props.length > 0 && data) {
-          data.push([
-            {
-              typeName: this.getTypeName({
-                ...operationObject,
-                method,
-                path: p,
-              }),
-              type: "Record<string, unknown>",
-              parent: undefined,
-              props: [props],
-              isEnum: false,
-            },
-          ]);
-        }
-      });
-    });
-    // ---- 生成 xxxparams 类型 end---------
+  private allocateTypeNames(): void {
+    if (this.namesAllocated) return;
+    this.namesAllocated = true;
+    const originals = Object.keys(this.openAPIData.components?.schemas || {}).sort();
+    const owners = new Map<string, string>();
+    for (const original of originals) {
+      const base = resolveTypeName(original) || "Schema";
+      if (!owners.has(base) || original === base) owners.set(base, original);
+    }
+    const used = new Set(owners.keys());
+    const unique = (base: string): string => {
+      let name = base;
+      let suffix = 2;
+      while (used.has(name)) name = `${base}${suffix++}`;
+      used.add(name);
+      return name;
+    };
+    for (const original of originals) {
+      const base = resolveTypeName(original) || "Schema";
+      this.schemaNames.set(original, owners.get(base) === original ? base : unique(base));
+    }
+    const operations = Object.values(this.apiData)
+      .flat()
+      .sort((a, b) =>
+        JSON.stringify([a.path, a.method]).localeCompare(JSON.stringify([b.path, b.method])),
+      );
+    for (const operation of operations) {
+      const key = JSON.stringify([operation.path, operation.method]);
+      if (this.parameterNames.has(key)) continue;
+      const requested =
+        this.config.hook?.customTypeName?.(operation) || this.getFuncationName(operation);
+      this.parameterNames.set(key, unique(resolveTypeName(`${requested}Params`) || "Params"));
+    }
+    for (const name of this.schemaNames.values())
+      for (const direction of ["Input", "Output"] as const)
+        this.directionNames.set(JSON.stringify([name, direction]), unique(name + direction));
+  }
 
-    return (
-      data &&
-      data
-        .flat()
-        // 排序下，要不每次git都乱了
-        .sort((a, b) => a.typeName.localeCompare(b.typeName))
-    );
+  private schemaTypeName(rawName: string): string {
+    this.allocateTypeNames();
+    return this.schemaNames.get(rawName) || resolveTypeName(rawName) || "Schema";
+  }
+
+  private referenceTypeName(schema: LegacySchema): string {
+    const token = schema.$ref!.split("/").pop()!;
+    return this.schemaTypeName(decodeURIComponent(token).replace(/~1/g, "/").replace(/~0/g, "~"));
+  }
+
+  private directionName(name: string, direction: "Input" | "Output"): string {
+    this.allocateTypeNames();
+    return this.directionNames.get(JSON.stringify([name, direction])) || name;
+  }
+
+  private directionalOmissions(
+    schema: LegacySchema,
+    direction: "Input" | "Output",
+    seen = new Set<string>(),
+  ): Set<string> {
+    if (schema.$ref) {
+      if (seen.has(schema.$ref)) return new Set();
+      seen.add(schema.$ref);
+      return this.directionalOmissions(
+        this.resolveRefObject<LegacySchema>(schema),
+        direction,
+        seen,
+      );
+    }
+    const omitted = new Set<string>();
+    for (const [key, property] of Object.entries(schema.properties || {})) {
+      const actual = property.$ref ? this.resolveRefObject<LegacySchema>(property) : property;
+      if (direction === "Input" ? actual.readOnly : actual.writeOnly) omitted.add(key);
+    }
+    for (const branch of schema.allOf || [])
+      for (const key of this.directionalOmissions(branch, direction, seen)) omitted.add(key);
+    return omitted;
+  }
+
+  private directionalSchema(schema: LegacySchema, direction: "Input" | "Output"): LegacySchema {
+    if (schema.$ref) {
+      const name = this.referenceTypeName(schema);
+      return { [generatedType]: this.directionName(name, direction) };
+    }
+    const result = { ...schema };
+    delete result.readOnly;
+    delete result.writeOnly;
+    if (Array.isArray(schema.required)) {
+      const omitted = this.directionalOmissions(schema, direction);
+      result.required = schema.required.filter((key) => !omitted.has(key));
+    }
+    if (schema.properties) {
+      const properties: Record<string, LegacySchema> = Object.create(null);
+      result.properties = properties;
+      for (const [key, property] of Object.entries(schema.properties)) {
+        const actual = property.$ref ? this.resolveRefObject<LegacySchema>(property) : property;
+        if (direction === "Input" ? actual.readOnly : actual.writeOnly) continue;
+        properties[key] = this.directionalSchema(property, direction);
+      }
+    }
+    for (const key of ["allOf", "anyOf", "oneOf"] as const)
+      if (schema[key])
+        result[key] = schema[key]!.map((item) => this.directionalSchema(item, direction));
+    if (schema.items && !Array.isArray(schema.items))
+      result.items = this.directionalSchema(schema.items, direction);
+    if (schema.additionalProperties && typeof schema.additionalProperties === "object")
+      result.additionalProperties = this.directionalSchema(schema.additionalProperties, direction);
+    return result;
   }
 
   private genFileFromTemplate(
@@ -1103,8 +1262,6 @@ class ServiceGenerator {
       ? Object.keys(schemaObject.properties).map((propName) => {
           const schema: LegacySchema =
             (schemaObject.properties && schemaObject.properties[propName]) || DEFAULT_SCHEMA;
-          // 剔除属性键值中的特殊符号，因为函数入参变量存在特殊符号会导致解析文件失败
-          propName = propName.replace(/[[|\]]/g, "");
           return {
             ...schema,
             name: propName,
@@ -1120,14 +1277,19 @@ class ServiceGenerator {
   }
 
   getType(schemaObject: unknown, namespace?: string): string {
+    const originGetType = (schema: unknown, targetNamespace = namespace || ""): string =>
+      defaultGetType(
+        schema,
+        targetNamespace,
+        (value) => this.getDescription(value),
+        (reference) => this.referenceTypeName(reference),
+      );
     const hookFunc = this.config.hook?.customType;
     if (hookFunc) {
-      const type = hookFunc(schemaObject as SchemaObject | undefined, namespace, defaultGetType);
-      if (typeof type === "string") {
-        return type;
-      }
+      const type = hookFunc(schemaObject as SchemaObject | undefined, namespace, originGetType);
+      if (typeof type === "string") return type;
     }
-    return defaultGetType(schemaObject, namespace, (schema) => this.getDescription(schema));
+    return originGetType(schemaObject);
   }
 
   private getDescription(schema: LegacySchema): string {
@@ -1194,16 +1356,10 @@ class ServiceGenerator {
     let enumStr;
     switch (this.config.enumStyle) {
       case "enum":
-        enumStr = `{${enumArray.map((v) => `${String(v)}="${String(v)}"`).join(",")}}`;
+        enumStr = `{${enumArray.map((v, index) => `${JSON.stringify(typeof v === "string" ? v : `Value${index}`)}=${JSON.stringify(typeof v === "boolean" ? String(v) : v)}`).join(",")}}`;
         break;
       case "string-literal":
-        enumStr = Array.from(
-          new Set(
-            enumArray.map((v) =>
-              typeof v === "string" ? `"${v.replace(/"/g, '"')}"` : this.getType(v),
-            ),
-          ),
-        ).join(" | ");
+        enumStr = Array.from(new Set(enumArray.map((v) => JSON.stringify(v)))).join(" | ");
         if (schemaObject.nullable) enumStr += " | null";
         break;
       default:
@@ -1288,30 +1444,23 @@ class ServiceGenerator {
     return `${res.join("/")}/`;
   }
 
-  private resolveRefObject<T>(refObject: T | ReferenceObject): T {
+  private resolveRefObject<T>(refObject: T | ReferenceObject, seen = new Set<string>()): T {
     const reference = refObject as ReferenceObject | undefined;
-    if (!reference || !reference.$ref) {
-      return refObject as T;
+    if (!reference?.$ref) return refObject as T;
+    if (!reference.$ref.startsWith("#/"))
+      throw new Error(`[openAPI]: Unresolved reference ${reference.$ref}`);
+    if (seen.has(reference.$ref))
+      throw new Error(`[openAPI]: Circular reference ${reference.$ref}`);
+    seen.add(reference.$ref);
+    let value: unknown = this.openAPIData;
+    for (const key of reference.$ref.slice(2).split("/")) {
+      value = (value as Record<string, unknown> | undefined)?.[
+        decodeURIComponent(key).replace(/~1/g, "/").replace(/~0/g, "~")
+      ];
     }
-    const refPaths = reference.$ref.split("/");
-    if (refPaths[0] === "#") {
-      refPaths.shift();
-      let obj: unknown = this.openAPIData;
-      refPaths.forEach((node) => {
-        obj = (obj as Record<string, unknown>)[node];
-      });
-      if (!obj) {
-        throw new Error(`[GenSDK] Data Error! Notfoud: ${reference.$ref}`);
-      }
-      const resolved = this.resolveRefObject<Record<string, unknown>>(
-        obj as Record<string, unknown>,
-      );
-      return {
-        ...resolved,
-        type: (obj as ReferenceObject).$ref ? resolved.type : obj,
-      } as T;
-    }
-    return refObject as T;
+    if (!value || typeof value !== "object")
+      throw new Error(`[openAPI]: Missing reference ${reference.$ref}`);
+    return this.resolveRefObject<T>(value as T, seen);
   }
 
   private getFinalFileName(s: string): string {
@@ -1335,154 +1484,32 @@ class ServiceGenerator {
     return functionName;
   }
   // 按tag生成类型文件
-  private genTypeFilesByTag(): void {
-    const { components } = this.openAPIData;
-    if (!components || !components.schemas) {
-      return;
-    }
-    const allSchemas = components.schemas;
-    const tagTypes: Record<string, InterfaceTemplate[]> = {};
-    Object.keys(this.apiData).forEach((tag) => {
-      tagTypes[tag] = [];
-    });
-    // 将schema按使用情况分配到对应的tag
-    Object.keys(allSchemas).forEach((typeName) => {
-      const schema = allSchemas[typeName];
-      const resolved = this.resolveObject(schema);
-      const result = typeof resolved === "string" ? {} : resolved;
-      const usedInTags = this.findTagsUsingType(typeName);
-      if (usedInTags.length > 0) {
-        // 将类型添加到使用它的所有tag中
-        usedInTags.forEach((tag) => {
-          if (tagTypes[tag]) {
-            tagTypes[tag].push({
-              typeName: resolveTypeName(typeName),
-              type: this.getDefinesType(result),
-              parent: result.parent,
-              props: result.props || [],
-              isEnum: result.isEnum,
-              nullable: (schema as LegacySchema).nullable,
-            });
-          }
-        });
-      } else {
-        // 如果没有找到使用的地方，添加到第一个tag中（作为通用类型）
-        const firstTag = Object.keys(tagTypes)[0];
-        if (firstTag) {
-          tagTypes[firstTag].push({
-            typeName: resolveTypeName(typeName),
-            type: this.getDefinesType(result),
-            parent: result.parent,
-            props: result.props || [],
-            isEnum: result.isEnum,
-            nullable: (schema as LegacySchema).nullable,
-          });
-        }
-      }
-    });
-
-    // 为每个tag生成对应的类型文件到types目录
-    Object.keys(tagTypes).forEach((tag) => {
-      if (tagTypes[tag].length > 0) {
-        const fileName = `${this.replaceDot(tag)}.d.ts`;
-
-        // 添加该tag下API的参数类型
-        const tagApiData = this.apiData[tag];
-        if (tagApiData) {
-          tagApiData.forEach((api) => {
-            const props: TemplateProperty[] = [];
-            if (api.parameters) {
-              api.parameters.forEach((item) => {
-                const parameter = this.resolveRefObject<ParameterObject>(item);
-                props.push({
-                  desc: escapeComment(parameter.description ?? ""),
-                  name: parameter.name,
-                  required: parameter.required,
-                  type: this.getType(parameter.schema),
-                });
-              });
-            }
-
-            if (props.length > 0) {
-              tagTypes[tag].push({
-                typeName: this.getTypeName({
-                  ...api,
-                  method: api.method,
-                  path: api.path,
-                }),
-                type: "Record<string, unknown>",
-                parent: undefined,
-                props: [props],
-                isEnum: false,
-              });
-            }
-          });
-        }
-        // 排序
-        tagTypes[tag].sort((a, b) => a.typeName.localeCompare(b.typeName));
-        this.genFileFromTemplate(`types/${fileName}`, "interface", {
-          namespace: this.config.namespace,
-          nullable: this.config.nullable,
-          list: tagTypes[tag],
-          disableTypeCheck: false,
-          declareType: this.config.declareType || "type",
-          equalSymbol: (this.config.declareType || "type") === "type" ? "=" : "",
-        });
-      }
-    });
-  }
-  private findTagsUsingType(typeName: string): string[] {
-    const usedInTags: string[] = [];
-    Object.keys(this.apiData).forEach((tag) => {
-      const tagApis = this.apiData[tag];
-      const isUsed = tagApis.some((api) => {
-        if (api.parameters) {
-          return api.parameters.some((param) => {
-            const resolvedParam = this.resolveRefObject<TemplateParameter>(param);
-            return (
-              (resolvedParam.schema as ReferenceObject | undefined)?.$ref?.includes(typeName) ||
-              resolvedParam.$ref?.includes(typeName)
-            );
-          });
-        }
-        if (api.requestBody) {
-          const resolvedBody = this.resolveRefObject<RequestBodyObject>(api.requestBody);
-          if (resolvedBody.content) {
-            const mediaType = Object.keys(resolvedBody.content)[0];
-            const schema = resolvedBody.content[mediaType]?.schema;
-            if ((schema as ReferenceObject | undefined)?.$ref?.includes(typeName)) {
-              return true;
-            }
-          }
-        }
-        if (api.responses) {
-          const response = this.resolveRefObject<ResponseObject | undefined>(
-            api.responses["200"] || api.responses.default,
-          );
-          if (response?.content) {
-            const mediaType = Object.keys(response.content)[0];
-            const schema = response.content[mediaType]?.schema;
-            if ((schema as ReferenceObject | undefined)?.$ref?.includes(typeName)) {
-              return true;
-            }
-          }
-        }
-
-        return false;
+  private genTypeFilesByTag(declarations: InterfaceTemplate[]): void {
+    const remaining = new Map(declarations.map((type) => [type.typeName, type]));
+    const tags = Object.keys(this.apiData);
+    tags.forEach((tag, index) => {
+      const names = new Set(this.apiData[tag].map((api) => this.getTypeName(api)));
+      const list = declarations.filter(
+        (type) =>
+          remaining.has(type.typeName) && (names.has(type.typeName) || index === tags.length - 1),
+      );
+      list.forEach((type) => remaining.delete(type.typeName));
+      this.genFileFromTemplate(`types/${this.replaceDot(tag)}.d.ts`, "interface", {
+        namespace: this.config.namespace,
+        nullable: this.config.nullable,
+        list,
+        disableTypeCheck: false,
+        declareType: this.config.declareType || "type",
+        equalSymbol: (this.config.declareType || "type") === "type" ? "=" : "",
       });
-
-      if (isUsed) {
-        usedInTags.push(tag);
-      }
     });
-
-    return usedInTags;
-  }
-  private getDefinesType(result: ResolvedSchema): string | boolean | LegacySchema {
-    if (result.type) {
-      return result.type;
-    }
-    return "Record<string, unknown>";
+    if (!tags.length && declarations.length)
+      this.genFileFromTemplate("types/common.d.ts", "interface", {
+        namespace: this.config.namespace,
+        list: declarations,
+        declareType: "type",
+        equalSymbol: "=",
+      });
   }
 }
 

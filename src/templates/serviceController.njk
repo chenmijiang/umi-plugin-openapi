@@ -1,30 +1,209 @@
 {{ requestImportStatement }}
 
+{% if hasParameters or hasFormBody %}
+{% if genType === "ts" %}
+type OpenAPIParameter = {
+  name: string;
+  inputName?: string;
+  in?: string;
+  style?: string;
+  explode?: boolean;
+  allowReserved?: boolean;
+  contentType?: string;
+};
+{% if hasFormBody %}
+type OpenAPIEncoding = Record<string, Omit<OpenAPIParameter, 'name'> & { headers?: Record<string, unknown> }>;
+{% endif %}
+{% endif %}
+function encodeParameter(value{% if genType === "ts" %}: unknown{% endif %}, allowReserved = false) {
+  const encoded = encodeURIComponent(String(value)).replace(/[!'()*]/g, (char) =>
+    '%' + char.charCodeAt(0).toString(16).toUpperCase(),
+  );
+  return allowReserved
+    ? encoded.replace(/%(?:3A|2F|3F|23|5B|5D|40|21|24|26|27|28|29|2A|2B|2C|3B|3D)/gi, decodeURIComponent)
+    : encoded;
+}
+
+function parameterPairs(
+  name{% if genType === "ts" %}: string{% endif %},
+  value{% if genType === "ts" %}: unknown{% endif %},
+  definition{% if genType === "ts" %}: OpenAPIParameter{% endif %},
+  encoded = true,
+){% if genType === "ts" %}: [string, string][]{% endif %} {
+  const encode = (item{% if genType === "ts" %}: unknown{% endif %}) => encoded ? encodeParameter(item, definition.allowReserved) : String(item);
+  const key = (item{% if genType === "ts" %}: string{% endif %}) => encoded ? encodeParameter(item) : item;
+  if (definition.contentType) {
+    return [[key(name), encode(/(?:\/|\+)json(?:\s*;|$)/i.test(definition.contentType) ? JSON.stringify(value) : String(value))]];
+  }
+  const style = definition.style || 'form';
+  const explode = definition.explode === undefined ? style === 'form' : definition.explode;
+  if (style === 'deepObject' && value !== null && typeof value === 'object') {
+    const pairs{% if genType === "ts" %}: [string, string][]{% endif %} = [];
+    const append = (prefix{% if genType === "ts" %}: string{% endif %}, item{% if genType === "ts" %}: unknown{% endif %}) => {
+      if (item === undefined || item === null) return;
+      if (typeof item === 'object') {
+        const record = item{% if genType === "ts" %} as Record<string, unknown>{% endif %};
+        Object.keys(record).forEach((child) => append(`${prefix}[${key(child)}]`, record[child]));
+      } else {
+        pairs.push([prefix, encode(item)]);
+      }
+    };
+    append(key(name), value);
+    return pairs;
+  }
+  const separator = style === 'spaceDelimited' ? (encoded ? '%20' : ' ') : style === 'pipeDelimited' ? '|' : ',';
+  if (Array.isArray(value)) {
+    return explode ? value.map((item){% if genType === "ts" %}: [string, string]{% endif %} => [key(name), encode(item)]) : [[key(name), value.map(encode).join(separator)]];
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value{% if genType === "ts" %} as Record<string, unknown>{% endif %};
+    const keys = Object.keys(record);
+    return explode
+      ? keys.map((item){% if genType === "ts" %}: [string, string]{% endif %} => [key(item), encode(record[item])])
+      : [[key(name), keys.map((item) => `${key(item)}${separator}${encode(record[item])}`).join(separator)]];
+  }
+  return [[key(name), encode(value)]];
+}
+
+{% if hasParameters %}
+function serializeParameter(
+  value{% if genType === "ts" %}: unknown{% endif %},
+  definition{% if genType === "ts" %}: OpenAPIParameter{% endif %},
+) {
+  if (value === undefined || value === null) return '';
+  const location = definition.in;
+  const style = definition.style || (location === 'path' || location === 'header' ? 'simple' : 'form');
+  if (location !== 'path' && location !== 'header') {
+    const queryDefinition = location === 'query' ? definition : { ...definition, allowReserved: false };
+    return parameterPairs(definition.name, value, queryDefinition).map(([key, item]) => `${key}=${item}`).join(location === 'cookie' ? '; ' : '&');
+  }
+  const encode = (item{% if genType === "ts" %}: unknown{% endif %}) => location === 'header' ? String(item) : encodeParameter(item);
+  if (definition.contentType) {
+    return encode(/(?:\/|\+)json(?:\s*;|$)/i.test(definition.contentType) ? JSON.stringify(value) : String(value));
+  }
+  const name = encode(definition.name);
+  const explode = definition.explode === true;
+  const separator = style === 'label' && explode ? '.' : ',';
+  let result;
+  if (Array.isArray(value)) {
+    result = value.map(encode).join(style === 'matrix' && explode ? `;${name}=` : separator);
+  } else if (typeof value === 'object') {
+    const record = value{% if genType === "ts" %} as Record<string, unknown>{% endif %};
+    result = Object.keys(record).map((key) => `${encode(key)}${explode ? '=' : ','}${encode(record[key])}`)
+      .join(style === 'matrix' && explode ? ';' : separator);
+  } else {
+    result = encode(value);
+  }
+  if (style === 'label') return `.${result}`;
+  if (style === 'matrix') return `;${explode && typeof value === 'object' && !Array.isArray(value) ? '' : `${name}=`}${result}`;
+  return result;
+}
+
+function serializeParameters(
+  params{% if genType === "ts" %}: Record<string, unknown>{% endif %},
+  definitions{% if genType === "ts" %}: OpenAPIParameter[]{% endif %},
+) {
+  const query{% if genType === "ts" %}: Record<string, unknown>{% endif %} = Object.create(null);
+  const headers{% if genType === "ts" %}: Record<string, string>{% endif %} = Object.create(null);
+  const search{% if genType === "ts" %}: string[]{% endif %} = [];
+  const cookies{% if genType === "ts" %}: string[]{% endif %} = [];
+  definitions.forEach((definition) => {
+    const value = params[definition.inputName || definition.name];
+    if (value === undefined || value === null || definition.in === 'path') return;
+    if (definition.in === 'query' && typeof value !== 'object' && definition.style === undefined && definition.explode === undefined && definition.allowReserved === undefined && !definition.contentType) {
+      query[definition.name] = value;
+      return;
+    }
+    const serialized = serializeParameter(value, definition);
+    if (definition.in === 'query') search.push(serialized);
+    if (definition.in === 'header') headers[definition.name] = serialized;
+    if (definition.in === 'cookie') cookies.push(serialized);
+  });
+  if (cookies.length) headers.Cookie = cookies.join('; ');
+  return { query, headers, search: search.filter(Boolean).join('&') };
+}
+
+function appendQuery(url{% if genType === "ts" %}: string{% endif %}, query{% if genType === "ts" %}: string{% endif %}) {
+  if (!query) return url;
+  const hashIndex = url.indexOf('#');
+  const hash = hashIndex < 0 ? '' : url.slice(hashIndex);
+  const base = hashIndex < 0 ? url : url.slice(0, hashIndex);
+  return base + (base.includes('?') ? (/[?&]$/.test(base) ? '' : '&') : '?') + query + hash;
+}
+{% endif %}
+
+{% if hasFormBody %}
+
+function partContentType(declared{% if genType === "ts" %}: string | undefined{% endif %}, actual{% if genType === "ts" %}: string{% endif %}) {
+  if (!declared) return actual;
+  const choices = declared.split(',').map((item) => item.trim()).filter(Boolean);
+  const actualType = actual.split(';')[0].trim().toLowerCase();
+  if (actualType && !actualType.includes('*') && choices.some((choice) => {
+    const type = choice.split(';')[0].trim().toLowerCase();
+    return type === actualType || type === '*/*' || type === actualType.split('/')[0] + '/*';
+  })) return actual;
+  const concrete = choices.find((choice) => !choice.split(';')[0].includes('*'));
+  if (concrete) return concrete;
+  throw new Error(`Cannot select a concrete content type from ${declared} for ${actual || 'an untyped part'}`);
+}
+
+async function serializeFormBody(
+  body{% if genType === "ts" %}: Record<string, unknown>{% endif %},
+  encoding{% if genType === "ts" %}: OpenAPIEncoding{% endif %},
+  multipart{% if genType === "ts" %}: boolean{% endif %},
+) {
+  const form = multipart ? new FormData() : undefined;
+  const fields{% if genType === "ts" %}: string[]{% endif %} = [];
+  for (const name of Object.keys(body)) {
+    let value = body[name];
+    if (value === undefined || value === null) continue;
+    const definition = Object.prototype.hasOwnProperty.call(encoding, name) ? encoding[name] : {};
+    if (!multipart) {
+      const contentType = definition.contentType
+        ? partContentType(definition.contentType, typeof Blob !== 'undefined' && value instanceof Blob ? value.type : typeof value === 'object' ? 'application/json' : 'text/plain')
+        : undefined;
+      if (typeof Blob !== 'undefined') {
+        if (value instanceof Blob) value = await value.text();
+        else if (Array.isArray(value)) value = await Promise.all(value.map((item) => item instanceof Blob ? item.text() : item));
+      }
+      parameterPairs(name, value, { ...definition, contentType, name }).forEach(([key, item]) => fields.push(`${key}=${item}`));
+      continue;
+    }
+    const append = (key{% if genType === "ts" %}: string{% endif %}, item{% if genType === "ts" %}: unknown{% endif %}) => {
+      if (item === undefined || item === null) return;
+      if (typeof Blob !== 'undefined' && item instanceof Blob) {
+        const contentType = partContentType(definition.contentType, item.type);
+        const part = contentType !== item.type ? item.slice(0, item.size, contentType) : item;
+        if (typeof File !== 'undefined' && item instanceof File) form{% if genType === "ts" %}!{% endif %}.append(key, part, item.name);
+        else form{% if genType === "ts" %}!{% endif %}.append(key, part);
+      } else if (definition.contentType || typeof item === 'object') {
+        const contentType = partContentType(definition.contentType, typeof item === 'object' ? 'application/json' : 'text/plain');
+        const text = /(?:\/|\+)json(?:\s*;|$)/i.test(contentType) ? JSON.stringify(item) : String(item);
+        form{% if genType === "ts" %}!{% endif %}.append(key, new Blob([text], { type: contentType }));
+      } else {
+        form{% if genType === "ts" %}!{% endif %}.append(key, String(item));
+      }
+    };
+    if (Array.isArray(value)) {
+      value.forEach((item) => append(name, item));
+    } else {
+      append(name, value);
+    }
+  }
+  return multipart ? form : fields.join('&');
+}
+{% endif %}
+{% endif %}
+
 {% for api in list -%}
 /** {{ api.desc if api.desc else '此处后端没有提供注释' }} {{api.method | upper}} {{ api.pathInComment | safe }} */
 export async function {{ api.functionName }}(
 {%- if api.params and api.hasParams %}
-  // 叠加生成的Param类型 (非body参数swagger默认没有生成对象)
   params
   {%- if genType === "ts" -%}
   : {{namespace}}.{{api.typeName}}
-    {# header 入参 -#}
-    {% if api.params.header -%}
-    & { // header
-    {% for param in api.params.header -%}
-    {% if param.description -%}
-    /** {{ param.description }} */
-    {% endif -%}
-      '{{ param.name }}'
-      {{- "?" if not param.required }}
-      {{- (": " + param.type + ";") | safe }}
-    {% endfor -%}
-    }
-    {%- endif -%}
   {%- endif -%}
-  {%- if api.hasParams -%}
   {{ "," if api.body or api.file}}
-  {%- endif -%}
 {%- endif -%}
 {%- if api.body -%}
   body
@@ -35,7 +214,7 @@ export async function {{ api.functionName }}(
     {% if prop.schema.description -%}
     /** {{ prop.schema.description }} */
     {% endif -%}
-    {{ prop.key }}{{ "?" if not prop.schema.required }}: {{ prop.schema.type }},
+    {{ prop.key | safe }}{{ "?" if not prop.schema.required }}: {{ prop.schema.type }},
     {%- endfor %}
   }
   {%- else -%}
@@ -57,83 +236,39 @@ export async function {{ api.functionName }}(
 {{ "," if api.body or api.hasParams or api.file }}
   options {{ ("?: " + requestOptionsType) if genType === "ts" }}
 ) {
-  {% if api.params and api.params.path -%}
-  const { {% for param in api.params.path %}'{{ param.name }}': {{ param.alias }}, {% endfor %}
-  {% if api.params.path -%}
-  ...queryParams
-  {% endif -%}
-  } = params;
-  {% endif -%}
-  {% if api.hasFormData -%}
-  const formData = new FormData();
-  {% if api.file -%}
-  {% for file in api.file %}
-  if({{file.title | safe}}){
-  {% if file.multiple %}
-  {{file.title | safe}}.forEach(f => formData.append('{{file.title | safe}}', f || ''));
-  {% else %}
-  formData.append('{{file.title | safe}}', {{file.title | safe}})
-  {% endif %}
-  }
-  {% endfor %}
-  {%- endif -%}
-  {% if api.body %}
-  Object.keys(body || {}).forEach(ele => {
-    {% if genType === "ts" %}
-    const item = (body as any)[ele];
-    {% else %}
-    const item = body[ele];
-    {% endif %}
-    if (item !== undefined && item !== null) {
-      {% if genType === "ts" %}
-      if (typeof item === 'object' && !(item instanceof File)) {
-        if (item instanceof Array) {
-          item.forEach((f) => formData.append(ele, f || ''));
-        } else {
-          formData.append(ele, new Blob([JSON.stringify(item)], {type: 'application/json'}));
-        }
-      } else {
-        formData.append(ele, item);
-      }
-      {% else %}
-      formData.append(ele, typeof item === 'object' ? JSON.stringify(item) : item);
-      {% endif %}
-    }
+  {% if api.hasParams -%}
+  const parameterDefinitions{% if genType === "ts" %}: OpenAPIParameter[]{% endif %} = {{ api.parameterDefinitions | dump | safe }};
+  const parameterValues{% if genType === "ts" %}: Record<string, unknown>{% endif %} = Object.assign(Object.create(null), {
+    {% for query in api.params.query -%}
+    {% if query.schema.default is defined -%}
+    [{{ (query.inputName or query.name) | dump | safe }}]: {{ query.schema.default | dump | safe }},
+    {% endif -%}
+    {% endfor -%}
+    ...params,
   });
-  {% endif %}
+  const serialized = serializeParameters(parameterValues, parameterDefinitions);
+  {% for param in api.params.path -%}
+  const {{ param.alias }} = serializeParameter(parameterValues[{{ (param.inputName or param.name) | dump | safe }}], parameterDefinitions.find((definition) => definition.in === 'path' && definition.name === {{ param.name | dump | safe }}){% if genType === "ts" %}!{% endif %});
+  {% endfor -%}
+  {% endif -%}
+  {% if api.hasFormData or api.body.mediaType === "application/x-www-form-urlencoded" -%}
+  const formData = ({% if api.body %}body !== undefined{% else %}false{% endif %}{% for file in api.file %} || {{ file.title | safe }} !== undefined{% endfor %}) ? await serializeFormBody({
+    {% if api.body -%}
+    ...(body || {}),
+    {% endif -%}
+    {% for file in api.file -%}
+    [{{ file.title | dump | safe }}]: {{ file.title | safe }},
+    {% endfor -%}
+  }, JSON.parse({{ api.encoding | dump | dump | safe }}), {{ 'false' if api.body.mediaType === "application/x-www-form-urlencoded" else 'true' }}) : undefined;
   {% endif -%}
 
-  {% if api.hasPathVariables or api.hasApiPrefix -%}
-  return request{{ ("<" + api.response.type + ">") | safe if genType === "ts" }}(`{{ api.path | safe }}`, {
-  {% else -%}
-  return request{{ ("<" + api.response.type + ">") | safe if genType === "ts" }}('{{ api.path }}', {
-  {% endif -%}
+  return request{{ ("<" + api.response.type + ">") | safe if genType === "ts" }}({% if api.hasParams %}appendQuery({% endif %}`{{ api.path | safe }}`{% if api.hasParams %}, serialized.search){% endif %}, {
     method: '{{ api.method | upper }}',
-    {%- if api.hasHeader and api.body.mediaType not in ["multipart/form-data"]%}
-    headers: {
-      {%- if api.body.mediaType %}
-      'Content-Type': '{{ api.body.mediaType | safe }}',
-      {%- endif %}
-    },
+    {% if api.response.responseType %}responseType: '{{ api.response.responseType }}',{% endif %}
+    {%- if api.hasParams %}
+    params: serialized.query,
     {%- endif %}
-    {%- if api.params and api.hasParams %}
-    params: {
-      {%- for query in api.params.query %}
-        {% if query.schema.default -%}
-          // {{query.name | safe}} has a default value: {{ query.schema.default | safe }}
-          '{{query.name | safe}}': '{{query.schema.default | safe}}',
-        {%- endif -%}
-      {%- endfor -%}
-      ...{{ 'queryParams' if api.params and api.params.path else 'params' }},
-      {%- for query in api.params.query %}
-        {%- if query.isComplexType %}
-          '{{query.name | safe}}': undefined,
-          ...{{ 'queryParams' if api.params and api.params.path else 'params' }}['{{query.name | safe}}'],
-        {%- endif %}
-      {%- endfor -%}
-    },
-    {%- endif %}
-    {%- if api.hasFormData %}
+    {%- if api.hasFormData or api.body.mediaType === "application/x-www-form-urlencoded" %}
     data: formData,
     {%- if api.body.mediaType === "multipart/form-data" %}
     requestType: 'form',
@@ -144,6 +279,17 @@ export async function {{ api.functionName }}(
     {%- endif %}
     {%- endif %}
     ...(options || {{api.options | dump}}),
+    {%- if api.hasHeader or api.params.cookie %}
+    headers: {
+      {%- if api.body.mediaType and api.body.mediaType !== "multipart/form-data" %}
+      'Content-Type': {{ api.body.mediaType | dump | safe }},
+      {%- endif %}
+      {%- if api.hasParams %}
+      ...serialized.headers,
+      {%- endif %}
+      ...(((options || {{api.options | dump}}){% if genType === "ts" %} as Record<string, unknown>{% endif %}).headers{% if genType === "ts" %} as Record<string, unknown> | undefined{% endif %}),
+    },
+    {%- endif %}
   });
 }
 

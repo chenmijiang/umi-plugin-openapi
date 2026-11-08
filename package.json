@@ -33,7 +33,6 @@
   },
   "dependencies": {
     "lodash": "^4.18.1",
-    "memoizee": "^0.4.17",
     "mockjs": "^1.1.0",
     "number-to-words": "^1.2.5",
     "nunjucks": "^3.2.4",
@@ -45,7 +44,6 @@
   },
   "devDependencies": {
     "@types/lodash": "^4.17.27",
-    "@types/memoizee": "^0.4.12",
     "@types/mockjs": "^1.0.10",
     "@types/node": "^26.6.5",
     "@types/number-to-words": "^1.2.3",

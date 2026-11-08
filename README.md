@@ -25,33 +25,28 @@ export default {
 };
 ```
 
-Set `schemaPath` to a local JSON file or URL, then generate:
+Set `schemaPath` to a local JSON file or URL, then generate services and types in `src/services/api/`, and mocks in `mock/`:
 
 ```sh
 npx umi openapi
 ```
 
-Services and types are written to `src/services/api/`, mocks to `mock/`. **Each run replaces the generated service directory.**
-
-Services import `request` from `umi` by default. Standard Umi projects must enable the [request plugin](https://umijs.org/docs/max/request) or set `requestLibPath`. Run `npx umi dev` to browse `/umi/plugin/openapi`.
+**Each run replaces the generated service directory.** Services import `request` from `umi`; enable the [request plugin](https://umijs.org/docs/max/request) or set `requestLibPath`. In development, browse `/umi/plugin/openapi`.
 
 ## Common options
 
-| Option           | Description                                                                                                                                                                       |
-| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schemaPath`     | Required. Local path or URL of a Swagger 2.0 / OpenAPI 3.0 JSON document.                                                                                                         |
-| `projectName`    | Service subdirectory name; defaults to the unscoped project package name.                                                                                                         |
-| `mock`           | Enable mock generation.                                                                                                                                                           |
-| `namespace`      | Generated TypeScript namespace; defaults to `API`.                                                                                                                                |
-| `requestLibPath` | Custom request import statement, replacing the default Umi request import.                                                                                                        |
-| `apiPrefix`      | Request path prefix, as a string or function.                                                                                                                                     |
-| `hook`           | Customize the schema, generated names, types, and request options.                                                                                                                |
-| `formatter`      | `"auto"` (default: prefer project Oxfmt dependencies/config, otherwise Prettier), `"oxfmt"`, `"prettier"`, `"none"` (skip formatting), or `{ external: { command, arguments } }`. |
+| Option           | Description                                                                                       |
+| ---------------- | ------------------------------------------------------------------------------------------------- |
+| `projectName`    | Service subdirectory; defaults to the unscoped package name.                                      |
+| `mock`           | Generate mocks.                                                                                   |
+| `namespace`      | Type namespace; defaults to `API`.                                                                |
+| `requestLibPath` | Import statement replacing the default Umi request import.                                        |
+| `apiPrefix`      | Request path prefix: string or function.                                                          |
+| `hook`           | Customize the schema, names, types, and request options.                                          |
+| `formatter`      | `"auto"` (default), `"oxfmt"`, `"prettier"`, `"none"`, or `{ external: { command, arguments } }`. |
 
-External formatters read stdin and return stdout; `{buffer_path}` is the absolute output path. Example: `{ external: { command: "prettier", arguments: ["--stdin-filepath", "{buffer_path}"] } }`.
+`auto` prefers project Oxfmt dependencies/config, otherwise Prettier. External formatters read stdin and return stdout; `{buffer_path}` expands to the absolute output path. Formatting failures warn and preserve unformatted output without changing the exit code.
 
-Formatting failures produce warnings and preserve unformatted output without changing the exit code.
+Use an `openAPI` array with distinct `projectName` values for multiple schemas. For HTTPS schemas with an internal CA, set `NODE_EXTRA_CA_CERTS`.
 
-For multiple schemas, pass an array to `openAPI` with distinct `projectName` values.
-
-For HTTPS schemas using an internal CA, set `NODE_EXTRA_CA_CERTS`.
+See [configuration](./src/config.ts) and [generator types](./src/core/types.ts) for all options and hook signatures; [AGENTS.md](./AGENTS.md) covers repository maintenance.

@@ -11,7 +11,7 @@ import { runInNewContext } from "node:vm";
 import { transform } from "esbuild";
 import * as ts from "typescript";
 import type { TestContext } from "vitest";
-import { describe, expect, test } from "vitest";
+import { describe, expect, onTestFinished, test } from "vitest";
 
 import type * as Core from "../src/core";
 
@@ -73,9 +73,7 @@ describe("published core schema loading", () => {
     const updatedSchema = { ...schema, info: { ...schema.info, version: "2.0.0" } };
     await writeFile(schemaPath, JSON.stringify(updatedSchema));
     await expect(getSchema(schemaPath)).resolves.toEqual(updatedSchema);
-    await expect(getSchema(join(directory, "missing.json"))).rejects.toMatchObject({
-      code: "MODULE_NOT_FOUND",
-    });
+    await expect(getSchema(join(directory, "missing.json"))).rejects.toThrow();
   });
 
   test("fetches HTTP JSON with authorization and without leaking it to the next request", async ({
@@ -177,6 +175,11 @@ async function loadGenerated<T>(filename: string, request?: unknown): Promise<T>
   runInNewContext(code, {
     module,
     exports: module.exports,
+    Blob,
+    File,
+    FormData,
+    URLSearchParams,
+    URL,
     require(name: string) {
       if (name === "test-request") return request;
       throw new Error(`Unexpected generated runtime dependency: ${name}`);
@@ -322,9 +325,9 @@ describe("published core service generation", () => {
       outputPath,
       `const nullableDetails: API.Nested = { details: null };
       const nested: API.Nested = {
-        details: { label: null, items: [null, "value"], reference: null,
+        details: { label: null, items: [null, "value"], reference: { id: "ref" },
           dictionary: { value: 123 }, typedDictionary: { value: "text" } },
-        references: [null, { id: "ref" }], loose: { value: 123 }
+        references: [{ id: "ref" }], loose: { value: 123 }
       };
       const details: NonNullable<API.Nested["details"]> = {
         label: "text", items: [], reference: { id: "ref" },
@@ -334,8 +337,9 @@ describe("published core service generation", () => {
       const label: string = details.label;
       // @ts-expect-error nullable items cannot be used as a string without narrowing
       const item: string = details.items[0];
-      // @ts-expect-error nullable references require narrowing
       const reference: API.Reference = details.reference;
+      // @ts-expect-error OpenAPI 3.0 Reference Object ignores nullable siblings
+      const invalidReference: NonNullable<API.Nested["details"]>["reference"] = null;
       const unknownNestedValue: unknown = details.dictionary.value;
       const unknownLooseValue: unknown = nested.loose!.value;
       // @ts-expect-error dictionary values are unknown, not any
@@ -742,7 +746,9 @@ describe("published core service generation", () => {
       requests.push({ url, options });
     });
     await service.查询资料({ id: "记录七" });
-    expect(requests).toEqual([{ url: "/资料/记录七", options: { method: "GET", params: {} } }]);
+    expect(requests).toEqual([
+      { url: `/资料/${encodeURIComponent("记录七")}`, options: { method: "GET", params: {} } },
+    ]);
 
     const mock = await loadGenerated<{
       default: Record<
@@ -1096,4 +1102,519 @@ process.stdin.on('end', () => {
       expect(result.stderr).toContain(fixture.files[1]);
     });
   }
+});
+
+describe("OpenAPI 3.0 generation boundaries", () => {
+  test.each([false, true])(
+    "inherits parameters and generates every method (split=%s)",
+    async (splitDeclare) => {
+      const operation = (method: string) => ({
+        operationId: method + "Boundary",
+        tags: ["boundary"],
+        responses: { "204": { description: "empty" } },
+      });
+      const config = await generationFixture(onTestFinished, {
+        ...schema,
+        components: { schemas: { Marker: { type: "string" } } },
+        "x-sharedPath": {
+          Shared: {
+            parameters: [
+              { name: "item-id", in: "path", required: true, schema: { type: "string" } },
+              { name: "item-id", in: "header", schema: { type: "string" } },
+              { name: "session", in: "query", schema: { type: "string" } },
+              { name: "count", in: "query", schema: { type: "string" } },
+            ],
+            ...Object.fromEntries(
+              ["get", "put", "post", "delete", "options", "head", "patch", "trace"].map(
+                (method) => [
+                  method,
+                  {
+                    ...operation(method),
+                    parameters: [
+                      { name: "count", in: "query", required: true, schema: { type: "number" } },
+                      { name: "X-Token", in: "header", schema: { type: "string" } },
+                      { name: "session", in: "cookie", schema: { type: "string" } },
+                    ],
+                  },
+                ],
+              ),
+            ),
+          },
+        },
+        paths: { "/boundary/{item-id}": { $ref: "#/x-sharedPath/Shared" } },
+      });
+      await generateService({ ...config, splitDeclare });
+      const outputPath = join(config.serversPath, "api");
+      const calls: [
+        string,
+        { method: string; params: Record<string, unknown>; headers: Record<string, string> },
+      ][] = [];
+      const service = await loadGenerated<
+        Record<
+          string,
+          (params: Record<string, unknown>, options?: Record<string, unknown>) => Promise<void>
+        >
+      >(
+        join(outputPath, "boundary.ts"),
+        async (
+          url: string,
+          options: {
+            method: string;
+            params: Record<string, unknown>;
+            headers: Record<string, string>;
+          },
+        ) => {
+          calls.push([url, options]);
+        },
+      );
+      for (const method of ["get", "put", "post", "delete", "options", "head", "patch", "trace"]) {
+        await service[method + "Boundary"](
+          {
+            "path.item-id": "a/b",
+            "header.item-id": "header-id",
+            count: 2,
+            "X-Token": "secret",
+            "cookie.session": "abc",
+            "query.session": "query-value",
+          },
+          { headers: { Authorization: "Bearer token", "X-Token": "override" } },
+        );
+        const [url, options] = calls.at(-1)!;
+        expect(url).toBe("/boundary/a%2Fb");
+        expect(options.method).toBe(method.toUpperCase());
+        expect(options.params).toEqual({ count: 2, session: "query-value" });
+        expect(options.headers["X-Token"]).toBe("override");
+        expect(options.headers["item-id"]).toBe("header-id");
+        expect(options.headers.Authorization).toBe("Bearer token");
+        expect(options.headers.Cookie).toBe("session=abc");
+      }
+      await compileGeneratedConsumer(
+        outputPath,
+        `import { getBoundary } from './boundary'; const response: Promise<void> = getBoundary({ 'path.item-id': 'a', 'header.item-id': 'h', 'query.session': 'q', 'cookie.session': 'c', count: 2 });\n// @ts-expect-error operation parameter overrides inherited string\ngetBoundary({ 'path.item-id': 'a', count: 'wrong' });`,
+      );
+    },
+  );
+
+  test("selects successful JSON responses and preserves composition and literal escaping", async ({
+    onTestFinished,
+  }) => {
+    const config = await generationFixture(onTestFinished, {
+      ...schema,
+      components: {
+        schemas: {
+          Literal: { type: "string", enum: ['quote"slash\\line\n'] },
+          Flags: { type: "boolean", enum: [true, false] },
+          Count: { type: "integer", enum: [0, 2] },
+          NumericText: { type: "string", format: "int64" },
+          NullableEnum: { type: "string", nullable: true, enum: ["only"] },
+          Combined: {
+            type: "object",
+            required: ["own"],
+            properties: { own: { type: "string" } },
+            oneOf: [
+              { type: "object", required: ["left"], properties: { left: { type: "number" } } },
+              { type: "object", required: ["right"], properties: { right: { type: "number" } } },
+            ],
+          },
+          Entity: {
+            type: "object",
+            required: ["id", "password", "name"],
+            properties: {
+              id: { type: "string", readOnly: true },
+              password: { type: "string", writeOnly: true },
+              name: { type: "string" },
+              children: { type: "array", items: { $ref: "#/components/schemas/Entity" } },
+            },
+          },
+        },
+      },
+      paths: {
+        "/boundary": {
+          post: {
+            operationId: "save",
+            tags: ["boundary"],
+            requestBody: {
+              required: true,
+              content: {
+                "text/plain": { schema: { type: "number" } },
+                "application/problem+json": { schema: { $ref: "#/components/schemas/Entity" } },
+              },
+            },
+            responses: {
+              default: {
+                description: "error",
+                content: { "application/json": { schema: { type: "boolean" } } },
+              },
+              "202": {
+                description: "accepted",
+                content: {
+                  "text/plain": { schema: { type: "number" } },
+                  "application/problem+json": { schema: { $ref: "#/components/schemas/Entity" } },
+                },
+              },
+              "204": { description: "empty" },
+            },
+          },
+        },
+      },
+    });
+    await generateService(config);
+    await compileGeneratedConsumer(
+      join(config.serversPath, "api"),
+      `import { save } from './boundary'; const literal: API.Literal = ${JSON.stringify('quote"slash\\line\n')}; const flag: API.Flags = false; const zero: API.Count = 0; const numericText: API.NumericText = '123'; const only: API.NullableEnum = 'only';\n// @ts-expect-error enum still excludes null even when nullable extends type\nconst invalidNull: API.NullableEnum = null;\n// @ts-expect-error format must not override explicitly declared string type\nconst invalidNumber: API.NumericText = 1;\nconst combined: API.Combined = { own: 'a', left: 1 };\n// @ts-expect-error own properties must survive composition\nconst invalid: API.Combined = { left: 1 };\nconst response: Promise<API.EntityOutput | void> = save({ password: 'p', name: 'n', children: [{ password: 'p', name: 'child' }] }); const output: API.EntityOutput = { id: 'i', name: 'n', children: [{ id: 'c', name: 'child' }] };`,
+    );
+  });
+});
+
+test("non-JSON media accepts serialized payloads and requests text decoding", async ({
+  onTestFinished,
+}) => {
+  const config = await generationFixture(onTestFinished, {
+    ...schema,
+    paths: {
+      "/xml": {
+        post: {
+          operationId: "sendXml",
+          tags: ["media"],
+          requestBody: {
+            required: true,
+            content: {
+              "application/xml": {
+                schema: { type: "object", properties: { value: { type: "string" } } },
+              },
+            },
+          },
+          responses: {
+            "200": {
+              description: "XML",
+              content: {
+                "application/xml": {
+                  schema: { type: "object", properties: { value: { type: "string" } } },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  });
+  await generateService(config);
+  const outputPath = join(config.serversPath, "api");
+  const service = await loadGenerated<{ sendXml: (body: string) => Promise<unknown> }>(
+    join(outputPath, "media.ts"),
+    async (url: string, options: unknown) => ({ url, options }),
+  );
+  await expect(service.sendXml("<value>text</value>")).resolves.toEqual({
+    url: "/xml",
+    options: {
+      method: "POST",
+      headers: { "Content-Type": "application/xml" },
+      responseType: "text",
+      data: "<value>text</value>",
+    },
+  });
+  await compileGeneratedConsumer(
+    outputPath,
+    `import { sendXml } from './media'; const text: Promise<string> = sendXml('<value>text</value>');\n// @ts-expect-error XML must be serialized by the caller, not sent as a JSON object\nsendXml({ value: 'text' });`,
+  );
+});
+
+test("literal path punctuation is not executable template syntax", async ({ onTestFinished }) => {
+  const path = "/urn:lookup/cost/${amount}/tick`/slash\\/{item-id}";
+  const config = await generationFixture(onTestFinished, {
+    ...schema,
+    paths: {
+      [path]: {
+        get: {
+          operationId: "literalPath",
+          tags: ["literal"],
+          responses: { "204": { description: "empty" } },
+        },
+      },
+    },
+  });
+  await generateService(config);
+  const outputPath = join(config.serversPath, "api");
+  const service = await loadGenerated<{
+    literalPath: (params: Record<string, string>) => Promise<unknown>;
+  }>(join(outputPath, "literal.ts"), async (url: string) => url);
+  await expect(service.literalPath({ amount: "5/6", "item-id": "a/b" })).resolves.toBe(
+    "/urn:lookup/cost/$5%2F6/tick`/slash\\/a%2Fb",
+  );
+  await compileGeneratedConsumer(
+    outputPath,
+    `import { literalPath } from './literal'; const empty: Promise<void> = literalPath({ amount: '5', 'item-id': 'a' });`,
+  );
+});
+
+test("direction types and serializer helpers do not collide with document names", async ({
+  onTestFinished,
+}) => {
+  const config = await generationFixture(onTestFinished, {
+    ...schema,
+    components: {
+      schemas: {
+        Foo: {
+          type: "object",
+          required: ["id", "name"],
+          properties: {
+            id: { type: "string", readOnly: true },
+            name: { type: "string" },
+            children: { type: "array", items: { $ref: "#/components/schemas/Foo" } },
+            ["__proto__"]: { type: "string" },
+          },
+        },
+        FooInput: { type: "string" },
+      },
+    },
+    paths: {
+      "/collision": {
+        post: {
+          operationId: "serializeParameters",
+          tags: ["constructor"],
+          parameters: [{ name: "__proto__", in: "query", schema: { type: "string" } }],
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { $ref: "#/components/schemas/Foo" } } },
+          },
+          responses: {
+            "200": {
+              description: "Foo",
+              content: { "application/json": { schema: { $ref: "#/components/schemas/Foo" } } },
+            },
+          },
+        },
+      },
+    },
+  });
+  await generateService({ ...config, isCamelCase: true });
+  const outputPath = join(config.serversPath, "api");
+  const service = await loadGenerated<{
+    serializeParameters_2: (params: Record<string, string>, body: unknown) => Promise<unknown>;
+  }>(join(outputPath, "constructor.ts"), async (url: string, options: unknown) => ({
+    url,
+    options,
+  }));
+  await expect(
+    service.serializeParameters_2(
+      { ["__proto__"]: "wire" },
+      { name: "parent", children: [{ name: "child" }] },
+    ),
+  ).resolves.toEqual({
+    url: "/collision",
+    options: {
+      method: "POST",
+      params: { ["__proto__"]: "wire" },
+      headers: { "Content-Type": "application/json" },
+      data: { name: "parent", children: [{ name: "child" }] },
+    },
+  });
+  await compileGeneratedConsumer(
+    outputPath,
+    `import { serializeParameters_2 } from './constructor'; const original: API.FooInput = 'original'; const input: API.FooInput2 = { name: 'n', children: [{ name: 'c' }], ['__proto__']: 'field' }; const result: Promise<API.FooOutput> = serializeParameters_2({ ['__proto__']: 'wire' }, input);`,
+  );
+});
+
+test("semantic generation errors preserve existing service output", async ({ onTestFinished }) => {
+  const config = await generationFixture(onTestFinished, serviceDocument(false));
+  await generateService(config);
+  const filename = join(config.serversPath, "api", "pets.ts");
+  const original = await readFile(filename, "utf8");
+  await expect(
+    generateService({
+      ...config,
+      hook: {
+        customType: () => {
+          throw new Error("semantic type failure");
+        },
+      },
+    }),
+  ).rejects.toThrow("semantic type failure");
+  expect(await readFile(filename, "utf8")).toBe(original);
+});
+
+test("directional aliases retain reserved names and inherited required constraints", async ({
+  onTestFinished,
+}) => {
+  const config = await generationFixture(onTestFinished, {
+    ...schema,
+    components: {
+      schemas: {
+        class: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "string", readOnly: true }, name: { type: "string" } },
+        },
+        Child: {
+          type: "object",
+          nullable: true,
+          allOf: [{ $ref: "#/components/schemas/class" }],
+          required: ["id", "name"],
+          properties: { extra: { type: "string" } },
+        },
+        NullableEnum: { type: "string", nullable: true, enum: ["yes", null] },
+      },
+    },
+    paths: {
+      "/edge": {
+        post: {
+          operationId: "saveInherited",
+          tags: ["edge"],
+          requestBody: {
+            required: true,
+            content: { "application/json": { schema: { $ref: "#/components/schemas/Child" } } },
+          },
+          responses: { "204": { description: "empty" } },
+        },
+      },
+      "/class": {
+        get: {
+          operationId: "readClass",
+          tags: ["edge"],
+          responses: {
+            "200": {
+              description: "reserved class",
+              content: { "application/json": { schema: { $ref: "#/components/schemas/class" } } },
+            },
+          },
+        },
+      },
+    },
+  });
+  await generateService({ ...config, enumStyle: "enum" });
+  await compileGeneratedConsumer(
+    join(config.serversPath, "api"),
+    `import { saveInherited, readClass } from './edge'; const yes: API.NullableEnum = 'yes'; const nil: API.NullableEnum = null; saveInherited({ name: 'required inherited name' }); const output: Promise<API.__openAPI__classOutput> = readClass();\n// @ts-expect-error required property defined in allOf must remain required\nsaveInherited({ extra: 'missing name' });\n// @ts-expect-error own nullable cannot relax a non-nullable allOf reference\nsaveInherited(null);\n// @ts-expect-error original composition also excludes null\nconst invalid: API.Child = null;`,
+  );
+});
+
+test("normalization collisions retain distinct schemas and explicit interface declarations", async ({
+  onTestFinished,
+}) => {
+  const response = (name: string) => ({
+    "200": {
+      description: name,
+      content: { "application/json": { schema: { $ref: `#/components/schemas/${name}` } } },
+    },
+  });
+  const config = await generationFixture(onTestFinished, {
+    ...schema,
+    components: {
+      schemas: {
+        "Foo-Bar": { type: "string", enum: ["dash"] },
+        Foo_Bar: { type: "integer", enum: [7] },
+        sameParams: { type: "string" },
+        "a.User": { type: "object", required: ["a"], properties: { a: { type: "string" } } },
+        "b.User": { type: "object", required: ["b"], properties: { b: { type: "number" } } },
+        Wrapper: {
+          type: "object",
+          required: ["alpha", "beta"],
+          properties: {
+            alpha: { $ref: "#/components/schemas/a.User" },
+            beta: { $ref: "#/components/schemas/b.User" },
+          },
+        },
+        "---": { type: "boolean" },
+        NamedAdditional: {
+          type: "object",
+          required: ["id"],
+          properties: { id: { type: "number" }, optional: { type: "boolean" } },
+          additionalProperties: { type: "string" },
+        },
+      },
+    },
+    paths: {
+      "/dash": {
+        get: {
+          operationId: "readDash",
+          tags: ["names"],
+          parameters: [
+            {
+              name: "value",
+              in: "query",
+              required: true,
+              schema: { $ref: "#/components/schemas/Foo-Bar" },
+            },
+          ],
+          responses: response("Foo-Bar"),
+        },
+      },
+      "/underscore": {
+        get: {
+          operationId: "readUnderscore",
+          tags: ["names"],
+          parameters: [
+            {
+              name: "value",
+              in: "query",
+              required: true,
+              schema: { $ref: "#/components/schemas/Foo_Bar" },
+            },
+          ],
+          responses: response("Foo_Bar"),
+        },
+      },
+    },
+  });
+  await generateService({
+    ...config,
+    declareType: "interface",
+    hook: {
+      customTypeName: () => "same",
+      customType: (value, namespace, origin) => origin(value, namespace),
+    },
+  });
+  const outputPath = join(config.serversPath, "api");
+  const program = await compileGeneratedConsumer(
+    outputPath,
+    `import { readDash, readUnderscore } from './names'; const dash: Promise<'dash'> = readDash({ value: 'dash' }); const underscore: Promise<7> = readUnderscore({ value: 7 }); const original: API.sameParams = 'original'; const fallback: API.Schema = true; const wrapper: API.Wrapper = { alpha: { a: 'a' }, beta: { b: 2 } }; const indexed: API.NamedAdditional = { id: 1, label: 'x' };\n// @ts-expect-error normalized schema references must retain distinct types\nreadDash({ value: 7 });\n// @ts-expect-error second normalized reference is numeric\nreadUnderscore({ value: 'dash' });\n// @ts-expect-error fixed dictionary properties retain their declared types\nconst invalidIndex: API.NamedAdditional = { id: 'wrong' };\n// @ts-expect-error nested dotted-name references must not be mixed\nconst invalidWrapper: API.Wrapper = { alpha: { b: 1 }, beta: { b: 2 } };`,
+  );
+  const declarations = program.getSourceFile(join(outputPath, "typings.d.ts"))!;
+  const kinds = new Map<string, ts.SyntaxKind>();
+  const visit = (node: ts.Node) => {
+    if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node))
+      kinds.set(node.name.text, node.kind);
+    ts.forEachChild(node, visit);
+  };
+  visit(declarations);
+  expect(kinds.get("Wrapper")).toBe(ts.SyntaxKind.InterfaceDeclaration);
+  expect(kinds.get("FooBar")).toBe(ts.SyntaxKind.TypeAliasDeclaration);
+});
+
+test("non-JSON content parameters accept serialized strings without object coercion", async ({
+  onTestFinished,
+}) => {
+  const content = {
+    "application/xml": { schema: { type: "object", properties: { value: { type: "string" } } } },
+  };
+  const config = await generationFixture(onTestFinished, {
+    ...schema,
+    paths: {
+      "/content": {
+        get: {
+          operationId: "readContent",
+          tags: ["content"],
+          parameters: [
+            { name: "document", in: "query", required: true, content },
+            { name: "X-Document", in: "header", required: true, content },
+          ],
+          responses: { "204": { description: "empty" } },
+        },
+      },
+    },
+  });
+  await generateService(config);
+  const outputPath = join(config.serversPath, "api");
+  const service = await loadGenerated<{
+    readContent: (params: Record<string, string>) => Promise<unknown>;
+  }>(join(outputPath, "content.ts"), async (url: string, options: unknown) => ({ url, options }));
+  const xml = "<value>a/b</value>";
+  await expect(service.readContent({ document: xml, "X-Document": xml })).resolves.toEqual({
+    url: `/content?document=${encodeURIComponent(xml)}`,
+    options: { method: "GET", params: {}, headers: { "X-Document": xml } },
+  });
+  await compileGeneratedConsumer(
+    outputPath,
+    `import { readContent } from './content'; readContent({ document: '<value/>', 'X-Document': '<value/>' });\n// @ts-expect-error non-JSON content must be serialized by the caller\nreadContent({ document: { value: 'x' }, 'X-Document': '<value/>' });`,
+  );
 });

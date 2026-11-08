@@ -1,5 +1,10 @@
-import memoizee from "memoizee";
-import type { OpenAPIObject, ReferenceObject, SchemaObject } from "openapi3-ts/oas30";
+import type {
+  ExampleObject,
+  OpenAPIObject,
+  ParameterObject,
+  ReferenceObject,
+  SchemaObject,
+} from "openapi3-ts/oas30";
 
 import primitives from "./primitives";
 import * as utils from "./utils";
@@ -114,158 +119,185 @@ function primitive(schema: SchemaObject, propsName?: string[]): MockValue {
   return schema.example as MockValue;
 }
 
+class RecursiveSampleError extends Error {}
+
 class OpenAPIGeneratorMockJs {
   protected openAPI: OpenAPIObject;
   constructor(openAPI: OpenAPIObject) {
     this.openAPI = openAPI;
-    this.sampleFromSchema = memoizee(this.sampleFromSchema);
   }
 
   sampleFromSchema = (
     schema: SchemaObject | ReferenceObject | undefined,
     propsName?: string[],
     schemaSet: Set<string> = new Set(),
+    requiredNames: ReadonlySet<string> = new Set(),
   ): MockValue => {
-    const schemaRef = schema && "$ref" in schema ? (schema.$ref as string) : undefined;
-
-    if (schemaRef) {
-      // 如果之前已经使用过该引用结构，直接返回null,不然会陷入无限递归的情况
-      if (schemaSet.has(schemaRef)) {
-        return null;
-      } else {
-        schemaSet.add(schemaRef);
-      }
+    if (!schema) return undefined;
+    const schemaRef = "$ref" in schema ? schema.$ref : undefined;
+    const localSchema = utils.resolveLocalRef(this.openAPI, schema) as SchemaObject;
+    if (localSchema.example !== undefined) return localSchema.example as MockValue;
+    if (localSchema.default !== undefined) return localSchema.default as MockValue;
+    if (localSchema.enum?.length) return localSchema.enum[0] as MockValue;
+    if (schemaRef && schemaSet.has(schemaRef)) {
+      if (localSchema.nullable && localSchema.type) return null;
+      if (localSchema.type === "array" && !localSchema.minItems) return [];
+      throw new RecursiveSampleError(
+        `[openAPI mock]: Recursive schema ref cannot produce a finite sample: ${schemaRef}`,
+      );
     }
+    const nextSet = new Set(schemaSet);
+    if (schemaRef) nextSet.add(schemaRef);
+    if (localSchema.not)
+      throw new Error(
+        "[openAPI mock]: Cannot synthesize a sample for a not schema; provide an example",
+      );
 
-    const localSchema = utils.objectify(
-      schemaRef
-        ? utils.get<SchemaObject>(this.openAPI, schemaRef.replace("#/", "").split("/"))
-        : (schema as SchemaObject | undefined),
-    );
-
-    let type: string | string[] | undefined = localSchema.type;
     const { properties, additionalProperties, items, anyOf, oneOf, allOf } = localSchema;
-
-    if (allOf) {
-      let obj: MockObject = {};
-      allOf.forEach((item) => {
-        const newObj = this.sampleFromSchema(item, propsName, new Set(schemaSet));
-        obj = {
-          ...obj,
-          ...(newObj as MockObject | null | undefined),
-        };
-      });
-      return obj;
+    if (allOf?.length) {
+      const { allOf: _allOf, ...ownSchema } = localSchema;
+      const composedRequired = new Set([
+        ...requiredNames,
+        ...(localSchema.required || []),
+        ...allOf.flatMap(
+          (item) => (utils.resolveLocalRef(this.openAPI, item) as SchemaObject).required || [],
+        ),
+      ]);
+      const samples = allOf.map((item) =>
+        this.sampleFromSchema(item, propsName, nextSet, composedRequired),
+      );
+      if (ownSchema.type || ownSchema.properties)
+        samples.push(this.sampleFromSchema(ownSchema, propsName, nextSet, composedRequired));
+      if (samples.every((item) => utils.isObject(item) && !Array.isArray(item))) {
+        return Object.assign(Object.create(null), ...samples) as MockObject;
+      }
+      if (samples.every((item) => item === samples[0])) return samples[0];
+      throw new Error(
+        "[openAPI mock]: Cannot synthesize incompatible allOf samples; provide an example",
+      );
     }
-
-    if (!type) {
+    const alternatives = oneOf || anyOf;
+    if (alternatives?.length) {
+      let selected: MockValue;
+      let recursiveError: RecursiveSampleError | undefined;
+      for (const alternative of alternatives) {
+        try {
+          selected = this.sampleFromSchema(alternative, propsName, nextSet);
+          recursiveError = undefined;
+          break;
+        } catch (error) {
+          if (!(error instanceof RecursiveSampleError)) throw error;
+          recursiveError = error;
+        }
+      }
+      if (recursiveError) throw recursiveError;
       if (properties) {
-        type = "object";
-      } else if (items) {
-        type = "array";
-      } else if (anyOf || oneOf) {
-        type = "union";
-      } else {
-        return null;
+        const { oneOf: _oneOf, anyOf: _anyOf, ...ownSchema } = localSchema;
+        const own = this.sampleFromSchema(ownSchema, propsName, nextSet);
+        if (utils.isObject(selected) && utils.isObject(own))
+          return { ...own, ...selected } as MockObject;
       }
+      return selected;
     }
-
-    if (type === "null") {
-      return null;
-    }
-
+    const type =
+      localSchema.type ||
+      (properties || additionalProperties ? "object" : items ? "array" : undefined);
     if (type === "object") {
-      const props = utils.objectify(properties);
-      const obj: MockObject = {};
-      for (const name in props) {
-        obj[name] = this.sampleFromSchema(
-          props[name],
-          [...(propsName || []), name],
-          new Set(schemaSet),
-        );
+      const obj: MockObject = Object.create(null);
+      for (const [name, property] of Object.entries(properties || {})) {
+        const resolved = utils.resolveLocalRef(this.openAPI, property) as SchemaObject;
+        // writeOnly applies to requests, even when the name occurs in required.
+        if (resolved.writeOnly) continue;
+        try {
+          obj[name] = this.sampleFromSchema(property, [...(propsName || []), name], nextSet);
+        } catch (error) {
+          if (
+            !(error instanceof RecursiveSampleError) ||
+            localSchema.required?.includes(name) ||
+            requiredNames.has(name)
+          )
+            throw error;
+          // Optional recursion can terminate by omitting the property, not by inventing null.
+        }
       }
-
-      if (additionalProperties === true) {
-        obj.additionalProp1 = {};
-        return obj;
-      }
-      if (additionalProperties) {
-        const additionalPropVal = this.sampleFromSchema(
-          additionalProperties,
-          propsName,
-          new Set(schemaSet),
-        );
-
-        for (let i = 1; i < 4; i += 1) {
-          obj[`additionalProp${i}`] = additionalPropVal;
+      if (additionalProperties && typeof additionalProperties === "object") {
+        try {
+          obj.additionalProp1 = this.sampleFromSchema(additionalProperties, propsName, nextSet);
+        } catch (error) {
+          if (!(error instanceof RecursiveSampleError)) throw error;
         }
       }
       return obj;
     }
-
     if (type === "array") {
-      const item = this.sampleFromSchema(items, propsName, new Set(schemaSet));
-      return Array.from({ length: parseInt((Math.random() * 20).toFixed(0), 10) }, () => item);
-    }
-
-    if (type === "union") {
-      const subschemas = anyOf || oneOf || [];
-      const subschemas_length = subschemas.length;
-      if (subschemas_length) {
-        const index = utils.getRandomInt(0, subschemas_length);
-        const obj = this.sampleFromSchema(subschemas[index], propsName, new Set(schemaSet));
-        return obj;
+      const length = localSchema.minItems ?? (localSchema.maxItems === 0 ? 0 : 1);
+      if (length === 0) return [];
+      try {
+        const item = this.sampleFromSchema(items, propsName, nextSet);
+        return Array.from({ length }, () => item);
+      } catch (error) {
+        if (!(error instanceof RecursiveSampleError) || localSchema.minItems) throw error;
+        return [];
       }
     }
-
-    if (localSchema.enum) {
-      if (localSchema.default) return localSchema.default as MockValue;
-      return utils.normalizeArray(localSchema.enum as MockValue[])[0];
-    }
-
-    if (type === "file") {
-      return null;
-    }
+    if (!type) return localSchema.nullable ? null : {};
     return primitive(localSchema, propsName);
   };
 
   parser = (): OpenAPIObject => {
-    const openAPI = {
-      ...this.openAPI,
-    };
-    for (const path in openAPI.paths) {
-      const pathConfig = openAPI.paths[path];
-      for (const method in pathConfig) {
-        const api: unknown = pathConfig[method as keyof typeof pathConfig];
-        if (!utils.isOperationObject(api)) continue;
-        for (const code in api.responses) {
-          const response = api.responses[code];
-          if ("$ref" in response) continue;
-
-          const keys = Object.keys(response.content || {});
-          if (keys.length) {
-            let key: string;
-
-            if (keys.includes("application/json")) {
-              key = "application/json";
-            } else if (keys.includes("*/*")) {
-              key = "*/*";
-            } else {
-              key = keys[0];
-            }
-
-            const schema = utils.inferSchema(response.content[key]);
-
-            if (schema) {
-              Object.assign(response, { example: this.sampleFromSchema(schema) });
-            }
-          }
+    // Sampling must not attach examples to the document used by service generation.
+    const openAPI = JSON.parse(JSON.stringify(this.openAPI)) as OpenAPIObject;
+    for (const path of Object.keys(openAPI.paths).filter((key) => key.startsWith("/"))) {
+      const pathConfig = utils.resolveLocalRef(this.openAPI, openAPI.paths[path]);
+      openAPI.paths[path] = { ...pathConfig };
+      for (const method of utils.httpMethods) {
+        const original = pathConfig[method];
+        if (!utils.isOperationObject(original)) continue;
+        const api = { ...original, responses: { ...original.responses } };
+        openAPI.paths[path][method] = api;
+        const inherited = (pathConfig.parameters || []).map(
+          (parameter) => utils.resolveLocalRef(this.openAPI, parameter) as ParameterObject,
+        );
+        const own = (api.parameters || []).map(
+          (parameter) => utils.resolveLocalRef(this.openAPI, parameter) as ParameterObject,
+        );
+        api.parameters = [
+          ...inherited.filter(
+            (parameter) =>
+              !own.some((item) => item.name === parameter.name && item.in === parameter.in),
+          ),
+          ...own,
+        ];
+        const { code } = utils.selectResponse(api.responses);
+        const response = { ...utils.resolveLocalRef(this.openAPI, api.responses[code]) };
+        api.responses[code] = response;
+        const content = response.content || {};
+        const keys = Object.keys(content);
+        const media =
+          content[
+            keys.includes("application/json")
+              ? "application/json"
+              : keys.includes("*/*")
+                ? "*/*"
+                : keys[0]
+          ];
+        if (!media) continue;
+        let example: MockValue;
+        if (media.example !== undefined) {
+          example = media.example as MockValue;
+        } else if (media.examples && Object.keys(media.examples).length) {
+          const candidate = Object.values(media.examples)[0];
+          if (!utils.isObject(candidate)) throw new Error("[openAPI mock]: Invalid media example");
+          const first = utils.resolveLocalRef(this.openAPI, candidate) as ExampleObject;
+          if (first.externalValue)
+            throw new Error(
+              "[openAPI mock]: externalValue examples are not fetched; provide a value",
+            );
+          example = first.value as MockValue;
+        } else {
+          example = this.sampleFromSchema(media.schema);
         }
-        if (!api.parameters) continue;
-        for (const parameter of api.parameters) {
-          const schema = utils.inferSchema(parameter);
-          Object.assign(parameter, { example: schema ? this.sampleFromSchema(schema) : null });
-        }
+        Object.assign(response, { example });
       }
     }
     return openAPI;
