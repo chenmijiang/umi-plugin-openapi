@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: npm distribution channel
+        type: choice
+        options:
+          - latest
+          - next
+        default: latest
+      increment:
+        description: Version increment (ignored for first release)
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+          - prerelease
+        default: patch
+      first_release:
+        description: Release the current package version without incrementing
+        type: boolean
+        default: false
+      dry_run:
+        description: Preview without publishing, committing, or pushing
+        type: boolean
+        default: true
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Prepare main branch
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          git switch -C main "$RELEASE_SHA"
+          git branch --set-upstream-to=origin/main main
+          git fetch origin main
+          test "$RELEASE_SHA" = "$(git rev-parse origin/main)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install npm with trusted publishing support
+        run: npm install --global npm@11.19.1
+
+      - run: npm ci
+
+      - name: Validate dry run
+        if: inputs.dry_run
+        run: |
+          npm test
+          npm pack --dry-run
+
+      - name: Release
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          INCREMENT: ${{ inputs.increment }}
+          FIRST_RELEASE: ${{ inputs.first_release }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HUSKY: "0"
+        shell: bash
+        run: |
+          if [[ "$CHANNEL" == "latest" && "$INCREMENT" == "prerelease" ]]; then
+            echo "The prerelease increment requires the next channel" >&2
+            exit 1
+          fi
+          if [[ "$CHANNEL" == "next" && "$FIRST_RELEASE" == "true" ]]; then
+            echo "First release without incrementing requires the latest channel" >&2
+            exit 1
+          fi
+          args=(--ci)
+          if [[ "$FIRST_RELEASE" == "true" ]]; then
+            node -e 'if (require("./package.json").version.includes("-")) throw new Error("A prerelease version cannot be published to latest without incrementing")'
+            args+=(--no-increment)
+          else
+            args+=("$INCREMENT")
+          fi
+          if [[ "$CHANNEL" == "next" ]]; then
+            args+=(--preRelease=beta --npm.tag=next --github.preRelease)
+          else
+            args+=(--npm.tag=latest)
+          fi
+          if [[ "$DRY_RUN" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          npm run release -- "${args[@]}"

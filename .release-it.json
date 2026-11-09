@@ -1,0 +1,18 @@
+{
+  "git": {
+    "requireBranch": "main",
+    "requireCleanWorkingDir": true,
+    "tagName": "v${version}",
+    "commitMessage": "chore: release v${version}"
+  },
+  "github": {
+    "release": true
+  },
+  "npm": {
+    "skipChecks": true
+  },
+  "hooks": {
+    "after:bump": ["npm test", "npm pack --dry-run"],
+    "before:release": "git fetch origin main && test \"$(git rev-parse HEAD)\" = \"$(git rev-parse origin/main)\""
+  }
+}

@@ -29,6 +29,7 @@
     "test": "vitest run",
     "oxfmt": "oxfmt",
     "oxlint": "oxlint",
+    "release": "release-it",
     "prepare": "husky"
   },
   "dependencies": {
@@ -56,6 +57,7 @@
     "oxfmt": "^0.74.0",
     "oxlint": "^1.89.0",
     "oxlint-tsgolint": "^7.0.2005",
+    "release-it": "^21.1.2",
     "tsdown": "^0.23.2",
     "typescript": "^6.0.3",
     "umi": "^4.7.28",
