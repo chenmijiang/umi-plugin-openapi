@@ -1,12 +1,16 @@
 # umi-plugin-openapi
 
+[![npm version](https://img.shields.io/npm/v/umi-plugin-openapi)](https://www.npmjs.com/package/umi-plugin-openapi)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
+[![Node.js: >=22.17.0](https://img.shields.io/badge/node-%3E%3D22.17.0-green)](https://nodejs.org/)
+[![Umi: >=4.0.57 <5](https://img.shields.io/badge/umi-%3E%3D4.0.57%20%3C5-blue)](https://umijs.org/)
+[![npm downloads](https://img.shields.io/npm/dm/umi-plugin-openapi)](https://www.npmjs.com/package/umi-plugin-openapi)
+
 [English](./README.md) | 简体中文
 
 Umi 4 插件，根据 Swagger 2.0 / OpenAPI 3.0 文档生成 TypeScript 请求函数、类型声明和可选 Mock，提供开发环境 Swagger UI。
 
 ## 快速开始
-
-兼容 Umi `>=4.0.57 <5` 和 Node.js `>=22.17.0`。
 
 ```sh
 npm install --save-dev umi-plugin-openapi

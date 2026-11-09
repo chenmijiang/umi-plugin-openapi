@@ -1,12 +1,16 @@
 # umi-plugin-openapi
 
+[![npm version](https://img.shields.io/npm/v/umi-plugin-openapi)](https://www.npmjs.com/package/umi-plugin-openapi)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
+[![Node.js: >=22.17.0](https://img.shields.io/badge/node-%3E%3D22.17.0-green)](https://nodejs.org/)
+[![Umi: >=4.0.57 <5](https://img.shields.io/badge/umi-%3E%3D4.0.57%20%3C5-blue)](https://umijs.org/)
+[![npm downloads](https://img.shields.io/npm/dm/umi-plugin-openapi)](https://www.npmjs.com/package/umi-plugin-openapi)
+
 English | [简体中文](./README.zh-CN.md)
 
 A Umi 4 plugin that generates TypeScript API services and type declarations from Swagger 2.0 or OpenAPI 3.0 documents, with optional mocks and a development Swagger UI.
 
 ## Quick start
-
-Compatible with Umi `>=4.0.57 <5` and Node.js `>=22.17.0`.
 
 ```sh
 npm install --save-dev umi-plugin-openapi

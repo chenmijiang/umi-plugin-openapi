@@ -11,7 +11,7 @@ on:
           - next
         default: latest
       increment:
-        description: Version increment (ignored for first release)
+        description: Version increment (ignored when skip_increment is enabled)
         type: choice
         options:
           - patch
@@ -19,7 +19,7 @@ on:
           - major
           - prerelease
         default: patch
-      first_release:
+      skip_increment:
         description: Release the current package version without incrementing
         type: boolean
         default: false
@@ -76,7 +76,7 @@ jobs:
         env:
           CHANNEL: ${{ inputs.channel }}
           INCREMENT: ${{ inputs.increment }}
-          FIRST_RELEASE: ${{ inputs.first_release }}
+          SKIP_INCREMENT: ${{ inputs.skip_increment }}
           DRY_RUN: ${{ inputs.dry_run }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           HUSKY: "0"
@@ -86,12 +86,12 @@ jobs:
             echo "The prerelease increment requires the next channel" >&2
             exit 1
           fi
-          if [[ "$CHANNEL" == "next" && "$FIRST_RELEASE" == "true" ]]; then
-            echo "First release without incrementing requires the latest channel" >&2
+          if [[ "$CHANNEL" == "next" && "$SKIP_INCREMENT" == "true" ]]; then
+            echo "Skipping the version increment requires the latest channel" >&2
             exit 1
           fi
           args=(--ci)
-          if [[ "$FIRST_RELEASE" == "true" ]]; then
+          if [[ "$SKIP_INCREMENT" == "true" ]]; then
             node -e 'if (require("./package.json").version.includes("-")) throw new Error("A prerelease version cannot be published to latest without incrementing")'
             args+=(--no-increment)
           else
