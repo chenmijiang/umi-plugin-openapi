@@ -184,7 +184,11 @@ async function loadGenerated<T>(filename: string, request?: unknown): Promise<T>
   return module.exports as T;
 }
 
-async function compileGeneratedConsumer(outputPath: string, consumer: string) {
+async function compileGeneratedConsumer(
+  outputPath: string,
+  consumer: string,
+  expectedDiagnostics?: { file: string; code: number }[],
+) {
   const consumerPath = join(outputPath, "consumer.ts");
   const requestTypesPath = join(outputPath, "request.d.ts");
   await writeFile(consumerPath, consumer);
@@ -208,13 +212,23 @@ async function compileGeneratedConsumer(outputPath: string, consumer: string) {
     },
   });
   const diagnostics = ts.getPreEmitDiagnostics(program);
-  expect(
-    ts.formatDiagnostics(diagnostics, {
-      getCanonicalFileName: (filename) => filename,
-      getCurrentDirectory: () => outputPath,
-      getNewLine: () => "\n",
-    }),
-  ).toBe("");
+  if (expectedDiagnostics) {
+    expect(
+      diagnostics.map((diagnostic) => ({
+        file: diagnostic.file?.fileName.slice(outputPath.length + 1),
+        code: diagnostic.code,
+      })),
+    ).toEqual(expect.arrayContaining(expectedDiagnostics));
+    expect(diagnostics).toHaveLength(expectedDiagnostics.length);
+  } else {
+    expect(
+      ts.formatDiagnostics(diagnostics, {
+        getCanonicalFileName: (filename) => filename,
+        getCurrentDirectory: () => outputPath,
+        getNewLine: () => "\n",
+      }),
+    ).toBe("");
+  }
   return program;
 }
 
@@ -226,6 +240,174 @@ type GeneratedPetService = {
 };
 
 describe("published core service generation", () => {
+  test("array consumers distinguish empty, typed and unknown elements recursively", async ({
+    onTestFinished,
+  }) => {
+    const empty = { type: "array", maxItems: 0 };
+    const typedEmpty = { ...empty, items: { type: "string" } };
+    const typed = { type: "array", items: { type: "string" } };
+    const config = await generationFixture(onTestFinished, {
+      ...schema,
+      components: {
+        schemas: {
+          Empty: empty,
+          TypedEmpty: typedEmpty,
+          UnknownItems: { type: "array" },
+          NullItems: { type: "array", items: null },
+          Nested: {
+            type: "object",
+            required: ["empty", "matrix"],
+            properties: {
+              empty: typedEmpty,
+              matrix: { type: "array", items: typedEmpty },
+            },
+          },
+          Choice: { oneOf: [typed, empty] },
+          Either: { anyOf: [typed, typedEmpty] },
+          Combined: { allOf: [{ type: "array" }, typedEmpty] },
+          NullableEmpty: { ...typedEmpty, nullable: true },
+          NonemptyLimit: { ...typed, maxItems: 1 },
+        },
+      },
+    });
+    await generateService(config);
+    await compileGeneratedConsumer(
+      join(config.serversPath, "api"),
+      `const empty: API.Empty = [];
+      const typedEmpty: API.TypedEmpty = [];
+      // @ts-expect-error maxItems zero excludes even one element without items
+      const invalidEmpty: API.Empty = [1];
+      // @ts-expect-error items do not override maxItems zero
+      const invalidTypedEmpty: API.TypedEmpty = ["value"];
+      const nested: API.Nested = { empty: [], matrix: [[], []] };
+      // @ts-expect-error nested empty arrays also reject elements
+      const invalidNested: API.Nested = { empty: ["value"], matrix: [] };
+      // @ts-expect-error array elements retain their empty tuple constraint
+      const invalidMatrix: API.Nested = { empty: [], matrix: [["value"]] };
+      const choice: API.Choice = ["value"];
+      const noChoice: API.Choice = [];
+      const either: API.Either = ["value"];
+      const noEither: API.Either = [];
+      // @ts-expect-error an empty alternative must not erase typed array elements
+      const invalidChoice: API.Choice = [1];
+      // @ts-expect-error anyOf also retains element types
+      const invalidEither: API.Either = [1];
+      function consumeChoice(value: API.Choice): string | undefined {
+        return value[0];
+      }
+      function consumeEither(value: API.Either): string | undefined {
+        return value[0];
+      }
+      const combined: API.Combined = [];
+      // @ts-expect-error allOf retains the empty array constraint
+      const invalidCombined: API.Combined = ["value"];
+      const nullableEmpty: API.NullableEmpty = null;
+      const presentEmpty: API.NullableEmpty = [];
+      // @ts-expect-error nullable does not allow nonempty arrays
+      const invalidNullableEmpty: API.NullableEmpty = ["value"];
+      const limited: API.NonemptyLimit = ["value"];
+      const unknownItems: API.UnknownItems = ["text", 1, null];
+      const nullItems: API.NullItems = ["text", 1, null];
+      // @ts-expect-error absent items are unknown, not any
+      const unknownText: string = unknownItems[0];
+      // @ts-expect-error null items are also unknown, not any
+      const nullText: string = nullItems[0];
+      const item = unknownItems[0];
+      if (typeof item === "string") {
+        const narrowed: string = item;
+      }`,
+    );
+  });
+
+  for (const splitDeclare of [false, true]) {
+    for (const schemaOnly of [false, true]) {
+      for (const typeFileHeader of [undefined, "", "// Custom lint rules", "// @ts-nocheck"]) {
+        test(`type file headers only suppress declaration errors when requested (split=${splitDeclare}, schemaOnly=${schemaOnly}, header=${JSON.stringify(typeFileHeader)})`, async ({
+          onTestFinished,
+        }) => {
+          const document = serviceDocument(false);
+          const config = await generationFixture(onTestFinished, {
+            ...document,
+            ...(schemaOnly ? { paths: {} } : {}),
+            components: {
+              schemas: {
+                Pet: petSchema,
+                Unresolved: { type: "number" },
+              },
+            },
+          });
+          await generateService({
+            ...config,
+            splitDeclare,
+            ...(typeFileHeader === undefined ? {} : { typeFileHeader }),
+            requestOptionsType: "MissingRequestOptions",
+            hook: {
+              customType: (value, namespace, originGetType) =>
+                value?.type === "number"
+                  ? "MissingDeclarationType"
+                  : originGetType(value, namespace),
+            },
+          });
+          await compileGeneratedConsumer(
+            join(config.serversPath, "api"),
+            `const pet: API.Pet = { id: "pet-7", name: "Milo" };
+            // @ts-expect-error declaration headers do not disable consumer checks
+            const invalidPet: API.Pet = { id: 7, name: "Milo" };
+            ${
+              schemaOnly
+                ? ""
+                : `import client from "./index";
+            const response: Promise<API.Pet> = client.pets.getPet({ id: "pet-7" });
+            // @ts-expect-error declaration headers do not disable service argument checks
+            client.pets.getPet({ id: 7 });
+            // @ts-expect-error generated response fields retain their schema types
+            const invalidResponse: Promise<{ id: number }> = response;`
+            }`,
+            [
+              ...(schemaOnly ? [] : [{ file: "pets.ts", code: 2304 }]),
+              ...(typeFileHeader === "// @ts-nocheck"
+                ? []
+                : [
+                    {
+                      file: splitDeclare
+                        ? schemaOnly
+                          ? "types/common.d.ts"
+                          : "types/pets.d.ts"
+                        : "typings.d.ts",
+                      code: 2304,
+                    },
+                  ]),
+            ],
+          );
+        });
+      }
+
+      test(`consumers can use raw multiline type file headers (split=${splitDeclare}, schemaOnly=${schemaOnly})`, async ({
+        onTestFinished,
+      }) => {
+        const document = serviceDocument(false);
+        const config = await generationFixture(onTestFinished, {
+          ...document,
+          ...(schemaOnly ? { paths: {} } : {}),
+        });
+        await generateService({
+          ...config,
+          splitDeclare,
+          typeFileHeader: `type HeaderValue<T> =
+            T & { marker: "<&>" };${schemaOnly ? "\n" : ""}`,
+        });
+        await compileGeneratedConsumer(
+          join(config.serversPath, "api"),
+          `const value: HeaderValue<API.Pet> = { id: "pet-7", name: "Milo", marker: "<&>" };
+          // @ts-expect-error raw headers retain their literal and intersection semantics
+          const invalidMarker: HeaderValue<API.Pet> = { id: "pet-7", name: "Milo", marker: "other" };
+          // @ts-expect-error generic header types retain generated model requirements
+          const missingName: HeaderValue<API.Pet> = { id: "pet-7", marker: "<&>" };`,
+        );
+      });
+    }
+  }
+
   test("consumers retain recursive nullability, dictionaries, unions and nested documentation", async ({
     onTestFinished,
   }) => {

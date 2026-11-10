@@ -23,6 +23,7 @@ describe("openAPI config schema", () => {
       nullable: true,
       dataFields: ["data"],
       isCamelCase: false,
+      typeFileHeader: "// @ts-nocheck\n/* oxlint-disable */",
     };
 
     expect(configSchema.parse(config)).toEqual(config);
@@ -70,6 +71,7 @@ describe("openAPI config schema", () => {
     { config: {}, field: "schemaPath" },
     { config: { schemaPath: 123 }, field: "schemaPath" },
     { config: { schemaPath, mock: "true" }, field: "mock" },
+    { config: { schemaPath, typeFileHeader: true }, field: "typeFileHeader" },
     { config: { schemaPath, apiPrefix: 123 }, field: "apiPrefix" },
     { config: { schemaPath, hook: "not an object" }, field: "hook" },
     {

@@ -3,6 +3,8 @@ import type { OpenAPIObject, OperationObject, SchemaObject } from "openapi3-ts/o
 import type { APIDataType } from "./serviceGenerator";
 
 export type GenerateServiceProps = {
+  /** Custom content prepended to generated type declaration files; omitted by default. */
+  typeFileHeader?: string;
   /** Generated file formatter; defaults to auto (oxfmt when detected, otherwise Prettier). */
   formatter?:
     | "oxfmt"

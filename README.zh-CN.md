@@ -56,6 +56,7 @@ npx umi openapi
 | `mock`                              | `false`                 | 在 `mock/` 中生成 Mock。             |
 | [`requestLibPath`](#requestlibpath) | 导入 Umi `request`      | 请求实现。                           |
 | [`formatter`](#formatter)           | `"auto"`                | 格式化生成的服务和 Mock 文件。       |
+| [`typeFileHeader`](#typefileheader) | 无                      | 自定义生成类型声明文件的头部内容。   |
 | [`apiPrefix`](#apiprefix)           | 接口首个有效 server URL | 请求 URL 前缀。                      |
 | `namespace`                         | `"API"`                 | 生成类型的 TypeScript 命名空间。     |
 | [`nullable`](#nullable)             | `false`                 | 声明属性的可空策略。                 |
@@ -87,6 +88,19 @@ const formatter = {
 ```
 
 `{buffer_path}` 会替换为输出文件的绝对路径。格式化失败时告警并保留对应文件的未格式化内容，生成继续执行。
+
+### `typeFileHeader`
+
+字符串内容写入每个生成类型声明文件的头部，包括拆分后的声明文件。省略或空字符串不添加内容。内容不转义、不自动包裹注释，随后由配置的格式化器处理；服务、索引和 Mock 文件不受影响。
+
+```ts
+openAPI: {
+  schemaPath: "./openapi.json",
+  typeFileHeader: "// @ts-nocheck\n/* oxlint-disable */",
+}
+```
+
+按项目需要填写检查指令。示例跳过声明文件内部的 TypeScript 检查并禁用其 Oxlint 规则，消费代码仍按生成类型检查。
 
 ### `apiPrefix`
 

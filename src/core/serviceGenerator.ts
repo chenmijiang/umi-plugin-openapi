@@ -79,6 +79,7 @@ interface LegacySchema {
   required?: string[] | boolean;
   enum?: unknown[];
   items?: LegacySchema | LegacySchema[];
+  maxItems?: number;
   schema?: LegacySchema;
   properties?: Record<string, LegacySchema>;
   oneOf?: LegacySchema[];
@@ -155,7 +156,7 @@ interface TemplateContexts {
     namespace?: string;
     nullable?: boolean;
     list: InterfaceTemplate[];
-    disableTypeCheck?: boolean;
+    typeFileHeader?: string;
     declareType: "type" | "interface";
     equalSymbol: "=" | "";
   };
@@ -163,11 +164,9 @@ interface TemplateContexts {
     namespace?: string;
     requestOptionsType?: string;
     requestImportStatement?: string;
-    disableTypeCheck: boolean;
   };
   serviceIndex: {
     list: ControllerType[];
-    disableTypeCheck: boolean;
   };
 }
 
@@ -308,7 +307,7 @@ const getNonNullableType = (
   const schemaObject = input as LegacySchema | undefined;
   const typeOf = (schema: unknown): string => defaultGetType(schema, namespace, describe, refName);
   if (schemaObject === undefined || schemaObject === null) {
-    return "any";
+    return "unknown";
   }
   if (typeof schemaObject !== "object") {
     return String(schemaObject);
@@ -362,6 +361,7 @@ const getNonNullableType = (
   }
 
   if (type === "array") {
+    if (schemaObject.maxItems === 0) return "[]";
     let { items } = schemaObject;
     if (schemaObject.schema) {
       items = schemaObject.schema.items;
@@ -548,7 +548,6 @@ class ServiceGenerator {
         namespace: this.config.namespace,
         requestOptionsType: this.config.requestOptionsType,
         requestImportStatement: this.config.requestImportStatement,
-        disableTypeCheck: false,
         ...service,
       } satisfies TemplateContexts["serviceController"],
     }));
@@ -556,7 +555,6 @@ class ServiceGenerator {
       list: [...this.classNameList].sort((a, b) =>
         a.fileName < b.fileName ? -1 : a.fileName > b.fileName ? 1 : 0,
       ),
-      disableTypeCheck: false,
     };
 
     const files = this.config.splitDeclare
@@ -566,7 +564,7 @@ class ServiceGenerator {
             namespace: this.config.namespace,
             nullable: this.config.nullable,
             list: declarations,
-            disableTypeCheck: false,
+            typeFileHeader: this.config.typeFileHeader,
             declareType: this.config.declareType || "type",
             equalSymbol: (this.config.declareType || "type") === "type" ? "=" : "",
           }),
@@ -1245,7 +1243,7 @@ class ServiceGenerator {
           namespace: this.config.namespace,
           nullable: this.config.nullable,
           list,
-          disableTypeCheck: false,
+          typeFileHeader: this.config.typeFileHeader,
           declareType: this.config.declareType || "type",
           equalSymbol: (this.config.declareType || "type") === "type" ? "=" : "",
         },
@@ -1257,6 +1255,7 @@ class ServiceGenerator {
         context: {
           namespace: this.config.namespace,
           list: declarations,
+          typeFileHeader: this.config.typeFileHeader,
           declareType: "type",
           equalSymbol: "=",
         },

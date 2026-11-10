@@ -49,19 +49,20 @@ In development, browse `/umi/plugin/openapi`.
 
 `openAPI` accepts one configuration object or an [array for multiple schemas](#multiple-schemas). The table covers [Umi plugin options](./src/config.ts); [generator types](./src/core/types.ts) define callback signatures and additional standalone options.
 
-| Option                              | Default                    | Purpose                                         |
-| ----------------------------------- | -------------------------- | ----------------------------------------------- |
-| `schemaPath`                        | Required                   | Local JSON file or URL for the API document.    |
-| `projectName`                       | Package name without scope | Service subdirectory under `src/services/`.     |
-| `mock`                              | `false`                    | Generate mocks in `mock/`.                      |
-| [`requestLibPath`](#requestlibpath) | Umi `request` import       | Request implementation.                         |
-| [`formatter`](#formatter)           | `"auto"`                   | Format generated service and mock files.        |
-| [`apiPrefix`](#apiprefix)           | First effective server URL | Request URL prefix.                             |
-| `namespace`                         | `"API"`                    | TypeScript namespace for generated types.       |
-| [`nullable`](#nullable)             | `false`                    | Use nullable properties in declarations.        |
-| [`dataFields`](#datafields)         | None                       | Select a response property for the return type. |
-| `isCamelCase`                       | `true`                     | Use camelCase file and request function names.  |
-| [`hook`](#hook)                     | None                       | Customize client generation.                    |
+| Option                              | Default                    | Purpose                                                   |
+| ----------------------------------- | -------------------------- | --------------------------------------------------------- |
+| `schemaPath`                        | Required                   | Local JSON file or URL for the API document.              |
+| `projectName`                       | Package name without scope | Service subdirectory under `src/services/`.               |
+| `mock`                              | `false`                    | Generate mocks in `mock/`.                                |
+| [`requestLibPath`](#requestlibpath) | Umi `request` import       | Request implementation.                                   |
+| [`formatter`](#formatter)           | `"auto"`                   | Format generated service and mock files.                  |
+| [`typeFileHeader`](#typefileheader) | None                       | Custom content at the top of generated type declarations. |
+| [`apiPrefix`](#apiprefix)           | First effective server URL | Request URL prefix.                                       |
+| `namespace`                         | `"API"`                    | TypeScript namespace for generated types.                 |
+| [`nullable`](#nullable)             | `false`                    | Use nullable properties in declarations.                  |
+| [`dataFields`](#datafields)         | None                       | Select a response property for the return type.           |
+| `isCamelCase`                       | `true`                     | Use camelCase file and request function names.            |
+| [`hook`](#hook)                     | None                       | Customize client generation.                              |
 
 For HTTPS schema URLs, Node.js must trust the certificate. Set `NODE_EXTRA_CA_CERTS` for an internal CA.
 
@@ -87,6 +88,19 @@ const formatter = {
 ```
 
 `{buffer_path}` expands to the absolute output file path. Formatting failures warn and leave the affected files unformatted; generation continues.
+
+### `typeFileHeader`
+
+String content prepended to each generated type declaration file, including split declarations. Omitted or empty values add nothing. Content is inserted without escaping or comment wrapping, then processed by the configured formatter. Service, index, and mock files are unaffected.
+
+```ts
+openAPI: {
+  schemaPath: "./openapi.json",
+  typeFileHeader: "// @ts-nocheck\n/* oxlint-disable */",
+}
+```
+
+Choose the directives required by your project. The example skips TypeScript checks inside declaration files and disables their Oxlint rules; consumer code still checks against the generated types.
 
 ### `apiPrefix`
 

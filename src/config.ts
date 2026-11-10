@@ -4,6 +4,12 @@ import type { GenerateServiceProps } from "./core/types";
 
 export const configItemSchema = z.object({
   requestLibPath: z.string().optional().describe("Custom request method import path."),
+  typeFileHeader: z
+    .string()
+    .optional()
+    .describe(
+      "Custom content prepended to generated type declaration files, including split declarations. Supports multiple lines; omitted by default. Service and mock files are unaffected.",
+    ),
   formatter: z
     .union([
       z.enum(["oxfmt", "prettier", "auto", "none"]),
