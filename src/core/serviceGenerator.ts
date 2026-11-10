@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "path";
 
-import { camelCase } from "lodash";
+import camelCase from "lodash/camelCase";
 import numberToWords from "number-to-words";
 import * as nunjucks from "nunjucks";
 import type {
