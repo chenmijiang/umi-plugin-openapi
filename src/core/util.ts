@@ -51,15 +51,19 @@ export const formatFile = (
   content: string,
   filePath: string,
   formatter: NonNullable<GenerateServiceProps["formatter"]>,
-): [string, boolean] => {
+): [string, boolean, string] => {
   if (formatter === "none") {
-    return [content, false];
+    return [content, false, "none"];
   }
   let selected = formatter;
   try {
     if (selected === "auto") {
       selected = hasOxfmt(filePath) ? "oxfmt" : "prettier";
     }
+    const name =
+      typeof selected === "string"
+        ? selected
+        : [selected.external.command, ...selected.external.arguments].join(" ");
     if (selected === "prettier") {
       const prettier: SyncPrettier = require("prettier");
       return [
@@ -69,6 +73,7 @@ export const formatFile = (
           filepath: filePath,
         }),
         false,
+        name,
       ];
     }
     const command = selected === "oxfmt" ? "oxfmt" : selected.external.command;
@@ -103,14 +108,17 @@ export const formatFile = (
           .join(": "),
       );
     }
-    return [result.stdout, false];
+    return [result.stdout, false, name];
   } catch (error) {
-    const name = typeof selected === "string" ? selected : selected.external.command;
+    const name =
+      typeof selected === "string"
+        ? selected
+        : [selected.external.command, ...selected.external.arguments].join(" ");
     console.warn(
       `[openAPI]: Formatter ${name} failed for ${filePath}; preserving unformatted content:`,
       error,
     );
-    return [content, true];
+    return [content, true, name];
   }
 };
 

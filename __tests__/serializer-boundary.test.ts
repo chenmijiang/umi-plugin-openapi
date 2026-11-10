@@ -1,4 +1,3 @@
-import { File } from "node:buffer";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -13,18 +12,14 @@ import type * as Core from "../src/core";
 
 const require = createRequire(import.meta.url);
 const { generateService } = require("umi-plugin-openapi/core") as typeof Core;
-type Encoding = Record<
-  string,
-  { contentType?: string; style?: string; explode?: boolean; allowReserved?: boolean }
->;
 type RequestCall = { url: string; options: Record<string, unknown> };
 
 async function client(
   onTestFinished: TestContext["onTestFinished"],
-  encoding: Encoding,
   mediaType = "multipart/form-data",
   reservedParameters = false,
   optionalBody = false,
+  optionsDefaultValue?: Record<string, unknown>,
 ) {
   const directory = await mkdtemp(join(tmpdir(), "serializer-boundary-"));
   onTestFinished(() => rm(directory, { recursive: true, force: true }));
@@ -54,6 +49,11 @@ async function client(
                     allowReserved: true,
                     schema: { type: "string" },
                   },
+                  {
+                    name: "X-Trace",
+                    in: "header",
+                    schema: { type: "array", items: { type: "string" } },
+                  },
                 ]
               : [],
             requestBody: {
@@ -65,10 +65,8 @@ async function client(
                     properties: {
                       payload: { type: "object", additionalProperties: true },
                       note: { type: "string" },
-                      ...(optionalBody ? {} : { upload: { type: "string", format: "binary" } }),
                     },
                   },
-                  encoding,
                 },
               },
             },
@@ -84,6 +82,7 @@ async function client(
     projectName: "api",
     requestLibPath: "test-request",
     formatter: "none",
+    hook: { customOptionsDefaultValue: () => optionsDefaultValue },
   });
   const filename = join(directory, "api", "boundary.ts");
   const { code } = await transform(await readFile(filename, "utf8"), {
@@ -97,9 +96,6 @@ async function client(
   runInNewContext(code, {
     module,
     exports: module.exports,
-    Blob,
-    File,
-    FormData,
     require(name: string) {
       if (name !== "test-request") throw new Error(`Unexpected dependency: ${name}`);
       return async (url: string, options: Record<string, unknown>) => {
@@ -111,123 +107,76 @@ async function client(
   return { submit: generated.submit, calls };
 }
 
-function uploadedPart(calls: RequestCall[], name: string): Blob {
-  const value = (calls[0].options.data as FormData).get(name);
-  expect(value).toBeInstanceOf(Blob);
-  return value as Blob;
-}
-
-describe("generated multipart wire boundaries", () => {
-  test("multipart ignores URLencoded style, explode and allowReserved", async ({
-    onTestFinished,
-  }) => {
-    const { submit, calls } = await client(onTestFinished, {
-      payload: { style: "deepObject", explode: true, allowReserved: true },
-    });
-    await submit({ payload: { role: "a/b" } });
-    const form = calls[0].options.data as FormData;
-    expect([...form.keys()]).toEqual(["payload"]);
-    const part = uploadedPart(calls, "payload");
-    expect(part.type).toBe("application/json");
-    expect(await part.text()).toBe('{"role":"a/b"}');
-  });
-
-  for (const contentType of ["image/*", "image/jpeg, image/png"]) {
-    test(`matching ${contentType} preserves the file's concrete MIME and filename`, async ({
-      onTestFinished,
-    }) => {
-      const { submit, calls } = await client(onTestFinished, { upload: { contentType } });
-      await submit({}, new File(["pixels"], "photo.png", { type: "image/png" }));
-      const part = uploadedPart(calls, "upload") as File;
-      expect(part.type).toBe("image/png");
-      expect(part.name).toBe("photo.png");
-      expect(await part.text()).toBe("pixels");
-    });
-  }
-
-  test("a nonmatching file selects the first concrete MIME instead of emitting a list", async ({
-    onTestFinished,
-  }) => {
-    const { submit, calls } = await client(onTestFinished, {
-      upload: { contentType: "image/*, application/pdf, text/plain" },
-    });
-    await submit({}, new File(["document"], "input.bin", { type: "application/octet-stream" }));
-    const part = uploadedPart(calls, "upload") as File;
-    expect(part.type).toBe("application/pdf");
-    expect(part.name).toBe("input.bin");
-    expect(await part.text()).toBe("document");
-  });
-
-  test("an unmatched wildcard rejects before making a request", async ({ onTestFinished }) => {
-    const { submit, calls } = await client(onTestFinished, { upload: { contentType: "image/*" } });
-    await expect(submit({}, new Blob(["document"], { type: "application/pdf" }))).rejects.toThrow(
-      /concrete content type/,
-    );
-    expect(calls).toEqual([]);
-  });
-
-  test("object and scalar content type lists become concrete JSON and text parts", async ({
-    onTestFinished,
-  }) => {
-    const { submit, calls } = await client(onTestFinished, {
-      payload: { contentType: "application/json, application/xml" },
-      note: { contentType: "text/plain, text/html" },
-    });
-    await submit({ payload: { active: false }, note: "hello" });
-    const payload = uploadedPart(calls, "payload");
-    const note = uploadedPart(calls, "note");
-    expect([payload.type, await payload.text(), note.type, await note.text()]).toEqual([
-      "application/json",
-      '{"active":false}',
-      "text/plain",
-      "hello",
-    ]);
-  });
-
-  test("nonmatching wildcard-only scalar encodings reject instead of sending a MIME range", async ({
-    onTestFinished,
-  }) => {
-    const { submit, calls } = await client(onTestFinished, { note: { contentType: "image/*" } });
-    await expect(submit({ note: "hello" })).rejects.toThrow(/concrete content type/);
-    expect(calls).toEqual([]);
-  });
-
-  test("URLencoded binary content with a MIME list serializes file text instead of a Blob placeholder", async ({
-    onTestFinished,
-  }) => {
-    const { submit, calls } = await client(
-      onTestFinished,
-      { upload: { contentType: "text/html, text/plain" } },
-      "application/x-www-form-urlencoded",
-    );
-    const file = new File(["a/b & c"], "note.txt", { type: "text/plain" });
-    await submit({ upload: file });
-    expect(calls[0].options.data).toBe("upload=a%2Fb%20%26%20c");
-  });
-  test("allowReserved does not expose reserved characters in path or cookie parameters", async ({
-    onTestFinished,
-  }) => {
-    const { submit, calls } = await client(onTestFinished, {}, "multipart/form-data", true);
-    await submit({ id: "a/b", session: "a/b" }, {});
-    expect(calls[0].url).toBe("/upload/a%2Fb");
-    expect((calls[0].options.headers as Record<string, string>).Cookie).toBe("session=a%2Fb");
-    expect(calls[0].options.params).toEqual({});
-  });
-
+describe("generated request safety boundaries", () => {
   for (const mediaType of ["multipart/form-data", "application/x-www-form-urlencoded"]) {
-    test(`omitted optional ${mediaType} bodies remain undefined while explicit empty bodies serialize`, async ({
+    test(`omitted optional ${mediaType} bodies remain undefined and distinct from empty bodies`, async ({
       onTestFinished,
     }) => {
-      const { submit, calls } = await client(onTestFinished, {}, mediaType, false, true);
+      const { submit, calls } = await client(onTestFinished, mediaType, false, true);
       await submit();
       expect(calls[0].options.data).toBeUndefined();
-      await submit({});
+      await submit(mediaType === "multipart/form-data" ? new FormData() : {});
       if (mediaType === "multipart/form-data") {
         expect(calls[1].options.data).toBeInstanceOf(FormData);
         expect([...(calls[1].options.data as FormData).keys()]).toEqual([]);
       } else {
-        expect(calls[1].options.data).toBe("");
+        expect(calls[1].options.data).toEqual({});
       }
     });
   }
+});
+
+describe("generated request header precedence", () => {
+  for (const mediaType of ["application/json", "multipart/form-data"]) {
+    test(`${mediaType} options.headers replaces all generated headers, including with an empty object`, async ({
+      onTestFinished,
+    }) => {
+      const { submit, calls } = await client(onTestFinished, mediaType, true, true);
+      const params = { id: "one", session: "a%2Fb", "X-Trace": ["one", "two"] };
+      const body = mediaType === "multipart/form-data" ? new FormData() : {};
+      const generatedHeaders = {
+        ...(mediaType === "multipart/form-data" ? {} : { "Content-Type": mediaType }),
+        "X-Trace": ["one", "two"],
+        Cookie: "session=a%2Fb",
+      };
+
+      await submit(params, body);
+      expect(calls.at(-1)!.options.headers).toEqual(generatedHeaders);
+
+      await submit(params, body, { headers: { Authorization: "Bearer caller" } });
+      expect(calls.at(-1)!.options.headers).toEqual({ Authorization: "Bearer caller" });
+
+      await submit(params, body, { headers: {} });
+      expect(calls.at(-1)!.options.headers).toEqual({});
+
+      await submit(params, body, { timeout: 123 });
+      expect(calls.at(-1)!.options.headers).toEqual(generatedHeaders);
+    });
+  }
+
+  test("custom options defaults apply only when caller options are absent, without merging headers or defaults", async ({
+    onTestFinished,
+  }) => {
+    const { submit, calls } = await client(onTestFinished, "application/json", true, true, {
+      headers: { "X-Default": "hook" },
+      timeout: 123,
+    });
+    const params = { id: "one", session: "cookie", "X-Trace": ["one", "two"] };
+
+    await submit(params, {});
+    expect(calls.at(-1)!.options.headers).toEqual({ "X-Default": "hook" });
+    expect(calls.at(-1)!.options.timeout).toBe(123);
+
+    await submit(params, {}, {});
+    expect(calls.at(-1)!.options.headers).toEqual({
+      "Content-Type": "application/json",
+      "X-Trace": ["one", "two"],
+      Cookie: "session=cookie",
+    });
+    expect(calls.at(-1)!.options).not.toHaveProperty("timeout");
+
+    await submit(params, {}, { headers: {}, timeout: 456 });
+    expect(calls.at(-1)!.options.headers).toEqual({});
+    expect(calls.at(-1)!.options.timeout).toBe(456);
+  });
 });

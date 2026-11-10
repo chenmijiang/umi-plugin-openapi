@@ -58,8 +58,8 @@ const fixturePath = fileURLToPath(new URL("./fixtures/openapi30-complete.json", 
  *   /security; operation replacement/disable: /paths/~1items~1{id}/post and get.
  * Specification extensions: /x-fixture-purpose, /info/x-audience,
  *   /components/x-component-owner, /paths/x-purpose, get/x-client-note.
- * Deliberate boundary: constraints, XML, auth flows, callbacks, links and examples
- *   are descriptive input, NOT runtime validation/auth/notification/XML encoding.
+ * Deliberate boundary: parameter styles/encoding, constraints, XML, auth flows,
+ *   callbacks, links and examples are descriptive input, not runtime execution.
  */
 
 async function generateFixture(onTestFinished: TestContext["onTestFinished"]) {
@@ -112,20 +112,19 @@ async function compileConsumer(outputPath: string) {
     syntax.createItem({ id: "item-7", locale: "en" }, { name: "Milo", secret: "token" });
     syntax.styledPath({ label: ["a", "b"], matrix: { role: "admin" }, simple: [1, 2] });
     syntax.submitForm({ names: ["a", "b"], note: "hello world" });
+    syntax.uploadItem(new FormData());
     syntax.readAlias();
     read.then(item => {
       if (item !== undefined) {
-        const id: string = item.id;
+        const id: string | undefined = item.id;
         const name: string = item.name;
-        // @ts-expect-error response-direction models omit writeOnly fields
-        item.secret;
+        const secret: string | undefined = item.secret;
       }
     });
     // @ts-expect-error inherited path parameters remain required
     syntax.readItem({ locale: "en" });
     // @ts-expect-error operation-level parameters override inherited optionality
     syntax.readItem({ id: "item-7" });
-    // @ts-expect-error request-direction required writeOnly secret must be supplied
     syntax.replaceItem({ id: "item-7", locale: "en" }, { name: "Milo" });
   `,
   );
@@ -165,9 +164,6 @@ async function loadClient(outputPath: string, calls: RequestCall[]) {
   runInNewContext(code, {
     module,
     exports: module.exports,
-    URLSearchParams,
-    FormData,
-    Blob,
     require(name: string) {
       if (name !== "test-request") throw new Error(`Unexpected client dependency: ${name}`);
       return async (url: string, options: Record<string, unknown>) => {
@@ -181,18 +177,18 @@ async function loadClient(outputPath: string, calls: RequestCall[]) {
 }
 
 describe("OpenAPI 3.0 client behavior beside descriptive syntax", () => {
-  test("a strict TypeScript consumer uses generated methods, refs, unions, enums and directional models", async ({
+  test("a strict TypeScript consumer uses generated methods, refs, unions, enums and original models", async ({
     onTestFinished,
   }) => {
     await compileConsumer(await generateFixture(onTestFinished));
   });
 
-  test("ordinary clients still send inherited parameters, styles, JSON and form bodies beside descriptive features", async ({
+  test("ordinary clients send inherited parameters and JSON bodies beside descriptive features", async ({
     onTestFinished,
   }) => {
     const calls: RequestCall[] = [];
     const client = await loadClient(await generateFixture(onTestFinished), calls);
-    await client.readItem({ id: "item/7", locale: "en" }, { timeout: 123 });
+    await client.readItem({ id: "item%2F7", locale: "en" }, { timeout: 123 });
     expect(calls[0]).toMatchObject({
       url: "https://read.example.com/items/item%2F7",
       options: { method: "GET", params: { locale: "en" }, timeout: 123 },
@@ -207,13 +203,6 @@ describe("OpenAPI 3.0 client behavior beside descriptive syntax", () => {
         headers: { "Content-Type": "application/json" },
       },
     });
-    await client.styledPath({ label: ["a", "b"], matrix: { role: "admin" }, simple: [1, 2] });
-    expect(calls[2].url).toBe("https://eu.example.com/v1/styled/.a.b/;role=admin/1,2");
-    await client.submitForm({ names: ["a", "b"], note: "hello world" });
-    expect(calls[3].url).toBe("https://eu.example.com/v1/form");
-    expect(calls[3].options.method).toBe("POST");
-    expect(new URLSearchParams(String(calls[3].options.data)).get("names")).toBe("a,b");
-    expect(new URLSearchParams(String(calls[3].options.data)).get("note")).toBe("hello world");
     for (const [operation, method] of [
       ["headItem", "HEAD"],
       ["optionsItem", "OPTIONS"],
@@ -230,36 +219,6 @@ describe("OpenAPI 3.0 client behavior beside descriptive syntax", () => {
     expect(calls.at(-1)).toMatchObject({
       url: "https://eu.example.com/v1/alias",
       options: { method: "GET" },
-    });
-    await client.readItem(
-      {
-        id: "item-7",
-        locale: "en",
-        q: "a/b",
-        colors: ["red", "blue"],
-        spaces: ["a", "b"],
-        pipes: ["x", "y"],
-        filter: { name: "Milo" },
-        "X-Trace": ["one", "two"],
-        session: "cookie",
-        json: { active: true },
-      },
-      { headers: { Authorization: "Bearer supplied-by-caller" } },
-    );
-    const styledRequest = calls.at(-1)!;
-    const query = new URL(styledRequest.url).searchParams;
-    expect(query.get("q")).toBe("a/b");
-    // Decoding alone would also accept an incorrectly percent-encoded reserved slash.
-    expect(styledRequest.url).toContain("q=a/b");
-    expect(query.get("colors")).toBe("red,blue");
-    expect(query.get("spaces")).toBe("a b");
-    expect(query.get("pipes")).toBe("x|y");
-    expect(query.get("filter[name]")).toBe("Milo");
-    expect(query.get("json")).toBe('{"active":true}');
-    expect(styledRequest.options.headers).toMatchObject({
-      "X-Trace": "one,two",
-      Cookie: "session=cookie",
-      Authorization: "Bearer supplied-by-caller",
     });
   });
 });

@@ -74,12 +74,17 @@ function stageFiles(
   formatter: GenerateServiceProps["formatter"],
 ): boolean {
   let hasFormattingError = false;
+  const reportedFormatters = new Set<string>();
   for (const file of files) {
-    const [content, hasError] = formatFile(
+    const [content, hasError, formatterName] = formatFile(
       file.content,
       path.resolve(directory, file.relativePath),
       formatter || "auto",
     );
+    if (!reportedFormatters.has(formatterName)) {
+      console.log(`[openAPI]: Formatter: ${formatterName}`);
+      reportedFormatters.add(formatterName);
+    }
     hasFormattingError = hasError || hasFormattingError;
     prepareParents(stage, file.relativePath);
     const destination = path.join(stage, file.relativePath);

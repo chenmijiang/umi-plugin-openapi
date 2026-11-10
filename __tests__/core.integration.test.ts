@@ -390,6 +390,109 @@ describe("published core service generation", () => {
     expect(documentation.get("items")).toBe("Nested item collection");
   });
 
+  test("nullable compositions preserve all constraints in original schema consumers", async ({
+    onTestFinished,
+  }) => {
+    const compositions = ["allOf", "oneOf", "anyOf"] as const;
+    const schemas = Object.fromEntries(
+      compositions.flatMap((composition) => {
+        const combined = {
+          type: "object",
+          required: ["own"],
+          properties: { own: { type: "string" } },
+          [composition]: [
+            { type: "object", required: ["id"], properties: { id: { type: "string" } } },
+            { type: "object", required: ["count"], properties: { count: { type: "number" } } },
+          ],
+        };
+        return [
+          [composition, { ...combined, nullable: true }],
+          [`Strict${composition}`, combined],
+        ];
+      }),
+    );
+    const config = await generationFixture(onTestFinished, {
+      ...schema,
+      components: {
+        schemas: {
+          ...schemas,
+          Envelope: {
+            type: "object",
+            required: [...compositions, "advertiser"],
+            properties: {
+              ...Object.fromEntries(
+                compositions.map((name) => [name, { $ref: `#/components/schemas/${name}` }]),
+              ),
+              advertiser: { nullable: true, anyOf: [{ type: "number" }, { type: "string" }] },
+            },
+          },
+        },
+      },
+      paths: {
+        "/compositions": {
+          post: {
+            operationId: "saveCompositions",
+            tags: ["compositions"],
+            requestBody: {
+              required: true,
+              content: {
+                "application/json": { schema: { $ref: "#/components/schemas/Envelope" } },
+              },
+            },
+            responses: {
+              "200": {
+                description: "compositions",
+                content: {
+                  "application/json": { schema: { $ref: "#/components/schemas/Envelope" } },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    await generateService(config);
+    await compileGeneratedConsumer(
+      join(config.serversPath, "api"),
+      `import { saveCompositions } from './compositions';
+      const response: Promise<API.Envelope> = saveCompositions({
+        allOf: null, oneOf: null, anyOf: null, advertiser: null
+      });
+      const envelope: API.Envelope = {
+        allOf: null, oneOf: null, anyOf: null, advertiser: null
+      };
+      const advertiserText: API.Envelope["advertiser"] = "text";
+      const advertiserNumber: API.Envelope["advertiser"] = 1;
+      // @ts-expect-error nullable primitive alternatives still reject booleans
+      const invalidAdvertiser: API.Envelope["advertiser"] = false;
+      ${compositions
+        .map((composition) => {
+          const valid =
+            composition === "allOf"
+              ? `{ own: "value", id: "id", count: 1 }`
+              : `{ own: "value", id: "id" }`;
+          return `const nil${composition}: API.${composition} = null;
+          const valid${composition}: API.${composition} = ${valid};
+          const strict${composition}: API.Strict${composition} = ${valid};
+          // @ts-expect-error compositions without nullable still exclude null
+          const invalidNull${composition}: API.Strict${composition} = null;
+          // @ts-expect-error nullable applies to the entire intersection, not just own constraints
+          const missingOwn${composition}: API.${composition} = { id: "id", count: 1 };
+          // @ts-expect-error nullable does not make composition branches optional
+          const missingBranch${composition}: API.${composition} = { own: "value" };
+          // @ts-expect-error distinct branch constraints are not discarded
+          const invalidBranch${composition}: API.${composition} = { own: "value", id: false, count: false };
+          ${
+            composition === "allOf"
+              ? `// @ts-expect-error allOf still requires every branch
+          const missingCount${composition}: API.${composition} = { own: "value", id: "id" };`
+              : ""
+          }`;
+        })
+        .join("\n")}`,
+    );
+  });
+
   test("consumers distinguish closed empty objects from dictionaries and objects with properties", async ({
     onTestFinished,
   }) => {
@@ -479,6 +582,147 @@ describe("published core service generation", () => {
         // @ts-expect-error generated responses preserve nested closed object constraints
         response.push({ unexpected: true });
       });`,
+    );
+  });
+
+  test("multipart consumers supply one FormData with requiredness independent of schema shape", async ({
+    onTestFinished,
+  }) => {
+    const uploadSchema = {
+      type: "object",
+      required: ["file", "title"],
+      properties: {
+        file: { type: "string", format: "binary" },
+        title: { type: "string" },
+      },
+    };
+    const operation = (operationId: string, requestBody: unknown, withParams = false) => ({
+      post: {
+        operationId,
+        tags: ["uploads"],
+        ...(withParams
+          ? {
+              parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+            }
+          : {}),
+        requestBody,
+        responses: { "204": { description: "Uploaded" } },
+      },
+    });
+    const config = await generationFixture(onTestFinished, {
+      ...schema,
+      components: {
+        schemas: { Upload: uploadSchema },
+        requestBodies: {
+          RequiredUpload: {
+            required: true,
+            content: { "multipart/form-data": { schema: { $ref: "#/components/schemas/Upload" } } },
+          },
+          OptionalUpload: {
+            required: false,
+            content: { "multipart/form-data": { schema: uploadSchema } },
+          },
+        },
+      },
+      paths: {
+        "/inline/{id}": operation(
+          "inlineUpload",
+          {
+            required: true,
+            content: { "multipart/form-data": { schema: uploadSchema } },
+          },
+          true,
+        ),
+        "/referenced": operation("referencedUpload", {
+          $ref: "#/components/requestBodies/RequiredUpload",
+        }),
+        "/schema-ref": operation("schemaRefUpload", {
+          content: { "multipart/form-data": { schema: { $ref: "#/components/schemas/Upload" } } },
+        }),
+        "/no-schema": operation("noSchemaUpload", {
+          required: true,
+          content: { "multipart/form-data": {} },
+        }),
+        "/optional-no-schema": operation("optionalNoSchemaUpload", {
+          content: { "multipart/form-data": {} },
+        }),
+        "/file-only": operation("fileOnlyUpload", {
+          content: {
+            "multipart/form-data": {
+              schema: {
+                type: "object",
+                required: ["file"],
+                properties: { file: { type: "string", format: "binary" } },
+              },
+            },
+          },
+        }),
+        "/multiple-files": operation("multipleFilesUpload", {
+          required: true,
+          content: {
+            "multipart/form-data": {
+              schema: {
+                type: "object",
+                properties: {
+                  files: { type: "array", items: { type: "string", format: "binary" } },
+                  preview: { type: "string", format: "binary" },
+                },
+              },
+            },
+          },
+        }),
+        "/optional/{id}": operation(
+          "optionalUpload",
+          {
+            $ref: "#/components/requestBodies/OptionalUpload",
+          },
+          true,
+        ),
+      },
+    });
+    await generateService(config);
+    await compileGeneratedConsumer(
+      join(config.serversPath, "api"),
+      `import { inlineUpload, referencedUpload, schemaRefUpload, noSchemaUpload,
+        optionalNoSchemaUpload, fileOnlyUpload, multipleFilesUpload, optionalUpload } from "./uploads";
+      const form = new FormData();
+      const options = { timeout: 123, headers: { "X-Caller": "value" } };
+      inlineUpload({ id: "record" }, form, options);
+      referencedUpload(form, options);
+      schemaRefUpload(form, options);
+      schemaRefUpload();
+      noSchemaUpload(form, options);
+      optionalNoSchemaUpload(form, options);
+      optionalNoSchemaUpload();
+      optionalNoSchemaUpload(undefined, options);
+      fileOnlyUpload(form, options);
+      fileOnlyUpload();
+      multipleFilesUpload(form, options);
+      optionalUpload({ id: "record" }, form, options);
+      optionalUpload({ id: "record" });
+      optionalUpload({ id: "record" }, undefined, options);
+      // @ts-expect-error params stay first, before FormData
+      inlineUpload(form, { id: "record" });
+      // @ts-expect-error required inline bodies cannot be omitted
+      inlineUpload({ id: "record" });
+      // @ts-expect-error requiredness is resolved from requestBody refs
+      referencedUpload();
+      // @ts-expect-error missing schemas do not remove required bodies
+      noSchemaUpload();
+      // @ts-expect-error optional file schema fields do not make the request body optional
+      multipleFilesUpload();
+      // @ts-expect-error ordinary objects are not multipart bodies
+      referencedUpload({ file: new Blob(), title: "old" });
+      // @ts-expect-error the old body/files/options signature is gone
+      inlineUpload({ id: "record" }, { title: "old" }, new Blob(), options);
+      // @ts-expect-error file-only uploads still accept FormData, not a standalone file
+      fileOnlyUpload(new Blob());
+      // @ts-expect-error missing schemas still require FormData instead of arbitrary objects
+      noSchemaUpload({});
+      // @ts-expect-error optional bodies do not accept ordinary objects
+      optionalNoSchemaUpload({});
+      // @ts-expect-error options remain last; skipping an optional body needs undefined
+      optionalUpload({ id: "record" }, options);`,
     );
   });
 
@@ -741,9 +985,9 @@ describe("published core service generation", () => {
     }>(join(config.serversPath, "api", "中文服务.ts"), async (url: string, options: unknown) => {
       requests.push({ url, options });
     });
-    await service.查询资料({ id: "记录七" });
-    expect(requests).toEqual([
-      { url: `/资料/${encodeURIComponent("记录七")}`, options: { method: "GET", params: {} } },
+    await service.查询资料({ id: encodeURIComponent("记录七") });
+    expect(requests).toMatchObject([
+      { url: "/资料/%E8%AE%B0%E5%BD%95%E4%B8%83", options: { method: "GET" } },
     ]);
 
     const mock = await loadGenerated<{
@@ -1177,25 +1421,31 @@ describe("OpenAPI 3.0 generation boundaries", () => {
         },
       );
       for (const method of ["get", "put", "post", "delete", "options", "head", "patch", "trace"]) {
-        await service[method + "Boundary"](
-          {
-            "path.item-id": "a/b",
-            "header.item-id": "header-id",
-            count: 2,
-            "X-Token": "secret",
-            "cookie.session": "abc",
-            "query.session": "query-value",
-          },
-          { headers: { Authorization: "Bearer token", "X-Token": "override" } },
-        );
+        const params = {
+          "path.item-id": "a%2Fb",
+          "header.item-id": "header-id",
+          count: 2,
+          "X-Token": "secret",
+          "cookie.session": "abc",
+          "query.session": "query-value",
+        };
+        await service[method + "Boundary"](params);
+        expect(calls.at(-1)![1].headers).toEqual({
+          "item-id": "header-id",
+          "X-Token": "secret",
+          Cookie: "session=abc",
+        });
+        await service[method + "Boundary"](params, {
+          headers: { Authorization: "Bearer token", "X-Token": "override" },
+        });
         const [url, options] = calls.at(-1)!;
         expect(url).toBe("/boundary/a%2Fb");
         expect(options.method).toBe(method.toUpperCase());
         expect(options.params).toEqual({ count: 2, session: "query-value" });
-        expect(options.headers["X-Token"]).toBe("override");
-        expect(options.headers["item-id"]).toBe("header-id");
-        expect(options.headers.Authorization).toBe("Bearer token");
-        expect(options.headers.Cookie).toBe("session=abc");
+        expect(options.headers).toEqual({
+          Authorization: "Bearer token",
+          "X-Token": "override",
+        });
       }
       await compileGeneratedConsumer(
         outputPath,
@@ -1270,7 +1520,7 @@ describe("OpenAPI 3.0 generation boundaries", () => {
     await generateService(config);
     await compileGeneratedConsumer(
       join(config.serversPath, "api"),
-      `import { save } from './boundary'; const literal: API.Literal = ${JSON.stringify('quote"slash\\line\n')}; const flag: API.Flags = false; const zero: API.Count = 0; const numericText: API.NumericText = '123'; const only: API.NullableEnum = 'only';\n// @ts-expect-error enum still excludes null even when nullable extends type\nconst invalidNull: API.NullableEnum = null;\n// @ts-expect-error format must not override explicitly declared string type\nconst invalidNumber: API.NumericText = 1;\nconst combined: API.Combined = { own: 'a', left: 1 };\n// @ts-expect-error own properties must survive composition\nconst invalid: API.Combined = { left: 1 };\nconst response: Promise<API.EntityOutput | void> = save({ password: 'p', name: 'n', children: [{ password: 'p', name: 'child' }] }); const output: API.EntityOutput = { id: 'i', name: 'n', children: [{ id: 'c', name: 'child' }] };`,
+      `import { save } from './boundary'; const literal: API.Literal = ${JSON.stringify('quote"slash\\line\n')}; const flag: API.Flags = false; const zero: API.Count = 0; const numericText: API.NumericText = '123'; const only: API.NullableEnum = 'only';\n// @ts-expect-error enum still excludes null even when nullable extends type\nconst invalidNull: API.NullableEnum = null;\n// @ts-expect-error format must not override explicitly declared string type\nconst invalidNumber: API.NumericText = 1;\nconst combined: API.Combined = { own: 'a', left: 1 };\n// @ts-expect-error own properties must survive composition\nconst invalid: API.Combined = { left: 1 };\nconst response: Promise<API.Entity | void> = save({ password: 'p', name: 'n', children: [{ password: 'p', name: 'child' }] }); const output: API.Entity = { id: 'i', name: 'n', children: [{ id: 'c', name: 'child' }] };`,
     );
   });
 });
@@ -1333,35 +1583,87 @@ test("non-JSON media accepts serialized payloads and requests text decoding", as
   );
 });
 
-test("literal path punctuation is not executable template syntax", async ({ onTestFinished }) => {
-  const path = "/urn:lookup/cost/${amount}/tick`/slash\\/{item-id}";
-  const config = await generationFixture(onTestFinished, {
-    ...schema,
-    paths: {
-      [path]: {
-        get: {
-          operationId: "literalPath",
-          tags: ["literal"],
-          responses: { "204": { description: "empty" } },
+test.each([
+  { name: "without a prefix", apiPrefix: undefined, dedupeApiPrefix: true, prefix: "" },
+  {
+    name: "with a literal prefix",
+    apiPrefix: '"/cost${notCode}/tick`/slash\\/quote\'"',
+    dedupeApiPrefix: true,
+    prefix: "/cost${notCode}/tick`/slash\\/quote'",
+  },
+  {
+    name: "with a dynamic prefix expression",
+    apiPrefix: JSON.stringify("/cost${notCode}/tick`/slash\\/quote'"),
+    dedupeApiPrefix: false,
+    prefix: "/cost${notCode}/tick`/slash\\/quote'",
+  },
+  {
+    name: "with a substituted server prefix",
+    apiPrefix: undefined,
+    dedupeApiPrefix: true,
+    prefix: "/cost${notCode}/tick`/slash\\/quote'",
+    servers: [
+      { url: "/{base}/", variables: { base: { default: "cost${notCode}/tick`/slash\\/quote'" } } },
+    ],
+  },
+])(
+  "literal path punctuation is preserved $name",
+  async ({ apiPrefix, dedupeApiPrefix, prefix, servers }) => {
+    const path = "/urn:lookup/cost/${amount}/tick`/slash\\/{item-id}";
+    const staticPath = "/urn:lookup/cost$/tick`/slash\\/quote'\"";
+    const overridePath = `${staticPath}/\${notCode}`;
+    const config = await generationFixture(onTestFinished, {
+      ...schema,
+      servers,
+      paths: {
+        [path]: {
+          get: {
+            operationId: "literalPath",
+            tags: ["literal"],
+            responses: { "204": { description: "empty" } },
+          },
+        },
+        [staticPath]: {
+          get: {
+            operationId: "staticPath",
+            tags: ["literal"],
+            responses: { "204": { description: "empty" } },
+          },
+        },
+        "/overridden/{item-id}": {
+          get: {
+            operationId: "overriddenPath",
+            tags: ["literal"],
+            extensions: {
+              "x-antTech-description": { antTechApiName: overridePath },
+            },
+            responses: { "204": { description: "empty" } },
+          },
         },
       },
-    },
-  });
-  await generateService(config);
-  const outputPath = join(config.serversPath, "api");
-  const service = await loadGenerated<{
-    literalPath: (params: Record<string, string>) => Promise<unknown>;
-  }>(join(outputPath, "literal.ts"), async (url: string) => url);
-  await expect(service.literalPath({ amount: "5/6", "item-id": "a/b" })).resolves.toBe(
-    "/urn:lookup/cost/$5%2F6/tick`/slash\\/a%2Fb",
-  );
-  await compileGeneratedConsumer(
-    outputPath,
-    `import { literalPath } from './literal'; const empty: Promise<void> = literalPath({ amount: '5', 'item-id': 'a' });`,
-  );
-});
+    });
+    await generateService({ ...config, apiPrefix, dedupeApiPrefix });
+    const outputPath = join(config.serversPath, "api");
+    const service = await loadGenerated<{
+      literalPath: (params: Record<string, string>) => Promise<unknown>;
+      staticPath: () => Promise<unknown>;
+      overriddenPath: (params: Record<string, string>) => Promise<unknown>;
+    }>(join(outputPath, "literal.ts"), async (url: string) => url);
+    await expect(service.literalPath({ amount: "5%2F6", "item-id": "a%2Fb" })).resolves.toBe(
+      `${prefix}/urn:lookup/cost/$5%2F6/tick\`/slash\\/a%2Fb`,
+    );
+    await expect(service.staticPath()).resolves.toBe(`${prefix}${staticPath}`);
+    await expect(service.overriddenPath({ "item-id": "unused" })).resolves.toBe(
+      `${prefix}${overridePath}`,
+    );
+    await compileGeneratedConsumer(
+      outputPath,
+      `import { literalPath, staticPath } from './literal'; const empty: Promise<void> = literalPath({ amount: '5', 'item-id': 'a' }); const fixed: Promise<void> = staticPath();`,
+    );
+  },
+);
 
-test("direction types and serializer helpers do not collide with document names", async ({
+test("original schemas with explicit Input names and reserved document names remain usable", async ({
   onTestFinished,
 }) => {
   const config = await generationFixture(onTestFinished, {
@@ -1404,13 +1706,13 @@ test("direction types and serializer helpers do not collide with document names"
   await generateService({ ...config, isCamelCase: true });
   const outputPath = join(config.serversPath, "api");
   const service = await loadGenerated<{
-    serializeParameters_2: (params: Record<string, string>, body: unknown) => Promise<unknown>;
+    serializeParameters: (params: Record<string, string>, body: unknown) => Promise<unknown>;
   }>(join(outputPath, "constructor.ts"), async (url: string, options: unknown) => ({
     url,
     options,
   }));
   await expect(
-    service.serializeParameters_2(
+    service.serializeParameters(
       { ["__proto__"]: "wire" },
       { name: "parent", children: [{ name: "child" }] },
     ),
@@ -1425,7 +1727,7 @@ test("direction types and serializer helpers do not collide with document names"
   });
   await compileGeneratedConsumer(
     outputPath,
-    `import { serializeParameters_2 } from './constructor'; const original: API.FooInput = 'original'; const input: API.FooInput2 = { name: 'n', children: [{ name: 'c' }], ['__proto__']: 'field' }; const result: Promise<API.FooOutput> = serializeParameters_2({ ['__proto__']: 'wire' }, input);`,
+    `import { serializeParameters } from './constructor'; const original: API.FooInput = 'original'; const input: API.Foo = { name: 'n', children: [{ name: 'c' }], ['__proto__']: 'field' }; const result: Promise<API.Foo> = serializeParameters({ ['__proto__']: 'wire' }, input);\n// @ts-expect-error the explicit FooInput schema remains a string, not a derived Foo model\nconst invalidOriginal: API.FooInput = input;\n// @ts-expect-error Foo retains its own object schema\nconst invalidFoo: API.Foo = original;`,
   );
 });
 
@@ -1447,7 +1749,7 @@ test("semantic generation errors preserve existing service output", async ({ onT
   expect(await readFile(filename, "utf8")).toBe(original);
 });
 
-test("directional aliases retain reserved names and inherited required constraints", async ({
+test("original schema models retain reserved names and inherited required constraints", async ({
   onTestFinished,
 }) => {
   const config = await generationFixture(onTestFinished, {
@@ -1498,7 +1800,7 @@ test("directional aliases retain reserved names and inherited required constrain
   await generateService({ ...config, enumStyle: "enum" });
   await compileGeneratedConsumer(
     join(config.serversPath, "api"),
-    `import { saveInherited, readClass } from './edge'; const yes: API.NullableEnum = 'yes'; const nil: API.NullableEnum = null; saveInherited({ name: 'required inherited name' }); const output: Promise<API.__openAPI__classOutput> = readClass();\n// @ts-expect-error required property defined in allOf must remain required\nsaveInherited({ extra: 'missing name' });\n// @ts-expect-error own nullable cannot relax a non-nullable allOf reference\nsaveInherited(null);\n// @ts-expect-error original composition also excludes null\nconst invalid: API.Child = null;`,
+    `import { saveInherited, readClass } from './edge'; const yes: API.NullableEnum = 'yes'; const nil: API.NullableEnum = null; saveInherited({ id: 'id', name: 'required inherited name' }); const output: Promise<API.__openAPI__class> = readClass();\n// @ts-expect-error required property defined in allOf must remain required\nsaveInherited({ id: 'id', extra: 'missing name' });\nsaveInherited(null);\nconst nullable: API.Child = null;`,
   );
 });
 
@@ -1595,7 +1897,7 @@ test("normalization collisions retain distinct schemas and explicit interface de
   expect(kinds.get("FooBar")).toBe(ts.SyntaxKind.TypeAliasDeclaration);
 });
 
-test("non-JSON content parameters accept serialized strings without object coercion", async ({
+test("non-JSON content parameters require caller-serialized strings", async ({
   onTestFinished,
 }) => {
   const content = {
@@ -1619,14 +1921,6 @@ test("non-JSON content parameters accept serialized strings without object coerc
   });
   await generateService(config);
   const outputPath = join(config.serversPath, "api");
-  const service = await loadGenerated<{
-    readContent: (params: Record<string, string>) => Promise<unknown>;
-  }>(join(outputPath, "content.ts"), async (url: string, options: unknown) => ({ url, options }));
-  const xml = "<value>a/b</value>";
-  await expect(service.readContent({ document: xml, "X-Document": xml })).resolves.toEqual({
-    url: `/content?document=${encodeURIComponent(xml)}`,
-    options: { method: "GET", params: {}, headers: { "X-Document": xml } },
-  });
   await compileGeneratedConsumer(
     outputPath,
     `import { readContent } from './content'; readContent({ document: '<value/>', 'X-Document': '<value/>' });\n// @ts-expect-error non-JSON content must be serialized by the caller\nreadContent({ document: { value: 'x' }, 'X-Document': '<value/>' });`,
