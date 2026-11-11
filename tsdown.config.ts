@@ -11,4 +11,5 @@ export default defineConfig({
   dts: true,
   copy: [{ from: "src/templates/*.njk", to: "dist/templates" }],
   exports: true,
+  minify: true,
 });

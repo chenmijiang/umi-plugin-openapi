@@ -3,6 +3,7 @@
     "requireBranch": "main",
     "requireCleanWorkingDir": true,
     "tagName": "v${version}",
+    "tagExclude": "*-*",
     "commitMessage": "chore: release v${version}"
   },
   "github": {

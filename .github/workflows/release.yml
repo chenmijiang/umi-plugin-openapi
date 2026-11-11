@@ -98,7 +98,7 @@ jobs:
             args+=("$INCREMENT")
           fi
           if [[ "$CHANNEL" == "next" ]]; then
-            args+=(--preRelease=beta --npm.tag=next --github.preRelease)
+            args+=(--preRelease=beta --npm.tag=next --github.preRelease --git.tagExclude=)
           else
             args+=(--npm.tag=latest)
           fi
