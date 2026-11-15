@@ -237,6 +237,70 @@ test.each([
   expect(calls).toEqual([path]);
 });
 
+test.each([
+  {
+    name: "shared directories are omitted",
+    paths: ["/api/v1/users", "/api/v1/orders"],
+    functions: ["getUsers", "getOrders"],
+  },
+  {
+    name: "shorter paths retain their final segment",
+    paths: ["/api/users", "/api/users/detail"],
+    functions: ["getUsers", "getUsersDetail"],
+  },
+  {
+    name: "path order does not affect the common directory",
+    paths: ["/api/users/detail", "/api/users"],
+    functions: ["getUsersDetail", "getUsers"],
+  },
+  {
+    name: "a single path retains its final segment",
+    paths: ["/api/users"],
+    functions: ["getUsers"],
+  },
+  {
+    name: "different root segments are retained",
+    paths: ["/users", "/orders"],
+    functions: ["getUsers", "getOrders"],
+  },
+  {
+    name: "partial segment matches are not removed",
+    paths: ["/api/user/list", "/api/users/list"],
+    functions: ["getUserList", "getUsersList"],
+  },
+  {
+    name: "the root path prevents removal of other segments",
+    paths: ["/", "/api/users"],
+    functions: ["get", "getApiUsers"],
+  },
+  {
+    name: "a shared trailing slash is a directory boundary",
+    paths: ["/api/users/", "/api/users/detail"],
+    functions: ["get", "getDetail"],
+  },
+])("default function naming: $name", async ({ paths, functions }) => {
+  const config = await generationFixture(onTestFinished, {
+    ...schema,
+    paths: Object.fromEntries(
+      paths.map((path) => [
+        path,
+        { get: { tags: ["client"], responses: { "200": { description: "OK" } } } },
+      ]),
+    ),
+  });
+  await generateService({ ...config, mockFolder: undefined });
+  const calls: string[] = [];
+  const service = await loadGenerated<Record<string, () => Promise<unknown>>>(
+    join(config.serversPath, "api", "client.ts"),
+    async (url: string) => {
+      calls.push(url);
+    },
+  );
+  expect(Object.keys(service).sort()).toEqual([...functions].sort());
+  for (const name of functions) await service[name]();
+  expect(calls).toEqual(paths);
+});
+
 async function loadGenerated<T>(filename: string, request?: unknown): Promise<T> {
   const source = await readFile(filename, "utf8");
   const { code } = await transform(source, {

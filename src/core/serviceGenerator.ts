@@ -1155,32 +1155,18 @@ class ServiceGenerator {
       })
       .join("");
   }
-  // 检测所有path重复区域（prefix）
+  // Find the common directory prefix without consuming any path's final segment.
   private getBasePrefix(paths: string[]): string {
-    const arr: string[][] = [];
-    paths
-      .map((item) => item.split("/"))
-      .forEach((pathItem) => {
-        pathItem.forEach((item, key) => {
-          if (arr.length <= key) {
-            arr[key] = [];
-          }
-          arr[key].push(item);
-        });
-      });
-
-    const res: string[][] = [];
-    arr
-      .map((item) => Array.from(new Set(item)))
-      .every((item) => {
-        const b = item.length === 1;
-        if (b) {
-          res.push(item);
-        }
-        return b;
-      });
-
-    return `${res.join("/")}/`;
+    const first = paths[0];
+    if (!first) return "/";
+    let end = first.lastIndexOf("/") + 1;
+    for (let index = 1; index < paths.length && end > 1; index++) {
+      const path = paths[index];
+      let matched = 0;
+      while (matched < end && first[matched] === path[matched]) matched++;
+      if (matched < end) end = first.lastIndexOf("/", matched - 1) + 1;
+    }
+    return first.slice(0, end);
   }
 
   private resolveRefObject<T>(refObject: T | ReferenceObject, seen = new Set<string>()): T {
