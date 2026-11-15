@@ -1778,6 +1778,129 @@ describe("OpenAPI 3.0 generation boundaries", () => {
     },
   );
 
+  test("keeps colliding parameter inputs distinct from literal names and reuses path placeholders", async ({
+    onTestFinished,
+  }) => {
+    const config = await generationFixture(onTestFinished, {
+      ...schema,
+      paths: {
+        "/parameters/{id}/{id}/{implicit}/{implicit}": {
+          get: {
+            operationId: "readParameters",
+            tags: ["parameters"],
+            parameters: [
+              { name: "id", in: "query", required: true, schema: { type: "number" } },
+              { name: "id", in: "path", required: true, schema: { type: "string" } },
+              { name: "id", in: "header", required: true, schema: { type: "string" } },
+              { name: "id", in: "cookie", required: true, schema: { type: "string" } },
+              { name: "query.id", in: "query", required: true, schema: { type: "string" } },
+              { name: "query.id_2", in: "query", required: true, schema: { type: "string" } },
+            ],
+            responses: { "204": { description: "empty" } },
+          },
+        },
+      },
+    });
+    await generateService(config);
+    const outputPath = join(config.serversPath, "api");
+    const calls: unknown[] = [];
+    const service = await loadGenerated<{
+      readParameters: (params: Record<string, unknown>) => Promise<void>;
+    }>(join(outputPath, "parameters.ts"), async (url: string, options: unknown) => {
+      calls.push({ url, options });
+    });
+    await service.readParameters({
+      "query.id_3": 7,
+      "path.id": "path-value",
+      "header.id": "header-value",
+      "cookie.id": "cookie-value",
+      "query.id": "literal-name",
+      "query.id_2": "literal-suffix",
+      implicit: "fallback-value",
+    });
+    expect(calls).toEqual([
+      {
+        url: "/parameters/path-value/path-value/fallback-value/fallback-value",
+        options: {
+          method: "GET",
+          params: { id: 7, "query.id": "literal-name", "query.id_2": "literal-suffix" },
+          headers: { id: "header-value", Cookie: "id=cookie-value" },
+        },
+      },
+    ]);
+    await compileGeneratedConsumer(
+      outputPath,
+      `import { readParameters } from "./parameters";
+      const params = {
+        "query.id_3": 7,
+        "path.id": "path-value",
+        "header.id": "header-value",
+        "cookie.id": "cookie-value",
+        "query.id": "literal-name",
+        "query.id_2": "literal-suffix",
+        implicit: "fallback-value",
+      };
+      const response: Promise<void> = readParameters(params);
+      // @ts-expect-error the renamed query input retains its numeric type
+      readParameters({ ...params, "query.id_3": "wrong" });
+      // @ts-expect-error literal suffixed names retain their own schema type
+      readParameters({ ...params, "query.id_2": 2 });
+      const { implicit, ...withoutImplicit } = params;
+      // @ts-expect-error undeclared path placeholders become required inputs
+      readParameters(withoutImplicit);`,
+    );
+  });
+
+  test("custom parameter types use local names inside the configured namespace", async ({
+    onTestFinished,
+  }) => {
+    const config = await generationFixture(onTestFinished, {
+      ...schema,
+      components: { schemas: { Token: { type: "string", enum: ["valid-token"] } } },
+      paths: {
+        "/tokens/{token}": {
+          get: {
+            operationId: "readToken",
+            tags: ["tokens"],
+            parameters: [
+              {
+                name: "token",
+                in: "path",
+                required: true,
+                schema: { type: "string", format: "custom-token" },
+              },
+            ],
+            responses: { "204": { description: "empty" } },
+          },
+        },
+      },
+    });
+    await generateService({
+      ...config,
+      namespace: "Contracts",
+      hook: {
+        customType: (value, namespace, originGetType) =>
+          value?.format === "custom-token"
+            ? namespace
+              ? `${namespace}.Token`
+              : "Token"
+            : originGetType(value, namespace),
+      },
+    });
+    const outputPath = join(config.serversPath, "api");
+    const declaration = await readFile(join(outputPath, "typings.d.ts"), "utf8");
+    expect(declaration).toMatch(/\btoken["']?:\s*Token\b/);
+    expect(declaration).not.toContain("Contracts.Token");
+    await compileGeneratedConsumer(
+      outputPath,
+      `import { readToken } from "./tokens";
+      const token: Contracts.Token = "valid-token";
+      const response: Promise<void> = readToken({ token });
+      // @ts-expect-error custom parameter types retain the referenced model constraints
+      readToken({ token: "invalid-token" });`,
+    );
+  });
+
   test("selects successful JSON responses and preserves composition and literal escaping", async ({
     onTestFinished,
   }) => {

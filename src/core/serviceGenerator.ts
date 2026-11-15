@@ -121,7 +121,10 @@ interface BodyTemplate {
   mediaType: string;
   required: boolean;
   type?: string;
-  propertiesList?: { key: string; schema: LegacySchema & { type: string; required: boolean } }[];
+  propertiesList?: {
+    key: string;
+    schema: LegacySchema & { type: string; required: boolean };
+  }[];
 }
 
 interface ResponseTemplate {
@@ -426,7 +429,9 @@ const getNonNullableType = (
           ? describe(property)
           : escapeComment([property.title, property.description].filter(Boolean).join(" "));
         const propertyType = propertyTypes ? propertyTypes[index] : typeOf(property);
-        return `${description ? `/** ${description} */\n` : ""}${JSON.stringify(key)}${required ? "" : "?"}: ${propertyType};\n`;
+        return `${description ? `/** ${description} */\n` : ""}${JSON.stringify(
+          key,
+        )}${required ? "" : "?"}: ${propertyType};\n`;
       })
       .join("")}${indexSignature}}`;
   }
@@ -470,7 +475,10 @@ class ServiceGenerator {
   private namesAllocated = false;
   private pathBasePrefix: string;
 
-  protected config: GenerateServiceProps & { projectName: string; templatesFolder: string };
+  protected config: GenerateServiceProps & {
+    projectName: string;
+    templatesFolder: string;
+  };
   protected openAPIData: OpenAPIObject;
 
   constructor(config: GenerateServiceProps, openAPIData: OpenAPIObject) {
@@ -853,37 +861,51 @@ class ServiceGenerator {
     parameters: (ParameterObject | ReferenceObject)[] = [],
     path: string | null = null,
   ): Record<string, TemplateParameter[]> {
+    return this.collectParameters(parameters, path, (parameter) =>
+      this.getType(this.parameterSchema(parameter), this.config.namespace),
+    );
+  }
+
+  private collectParameters(
+    parameters: (ParameterObject | ReferenceObject)[] = [],
+    path: string | null = null,
+    renderType?: (parameter: TemplateParameter) => string,
+  ): Record<string, TemplateParameter[]> {
     const templateParams: Record<string, TemplateParameter[]> = {};
 
-    if (parameters && parameters.length) {
-      ["query", "path", "cookie", "header"].forEach((source) => {
-        // Possible values are "query", "header", "path" or "cookie". (https://swagger.io/specification/)
-        const params = parameters
-          .map((p) => this.resolveRefObject<TemplateParameter>(p))
-          .filter((p) => p.in === source)
-          .map((p) => ({
-            ...p,
-            description: escapeComment(p.description ?? ""),
-            type: this.getType(this.parameterSchema(p), this.config.namespace),
-          }));
-
-        if (params.length) {
-          templateParams[source] = params;
-        }
-      });
+    const groups = new Map<string, TemplateParameter[]>([
+      ["query", []],
+      ["path", []],
+      ["cookie", []],
+      ["header", []],
+    ]);
+    for (const parameter of parameters || []) {
+      const resolved = this.resolveRefObject<TemplateParameter>(parameter);
+      groups.get(resolved.in)?.push(resolved);
+    }
+    // 保持来源顺序；仅渲染显式参数，补齐的路径参数仍使用默认 string 类型。
+    for (const [source, params] of groups) {
+      if (!params.length) continue;
+      templateParams[source] = params.map((parameter) => ({
+        ...parameter,
+        description: escapeComment(parameter.description ?? ""),
+        ...(renderType ? { type: renderType(parameter) } : {}),
+      }));
     }
 
     if (path && path.length > 0) {
       const regex = /\{([^{}]+)\}/g;
       templateParams.path = templateParams.path || [];
+      const pathNames = new Set(templateParams.path.map((parameter) => parameter.name));
       let match = null;
       while ((match = regex.exec(path))) {
         const name = match[1];
-        if (!templateParams.path.some((p) => p.name === name)) {
+        if (!pathNames.has(name)) {
           templateParams.path.push({
             ...DEFAULT_PATH_PARAM,
             name: match[1],
           });
+          pathNames.add(name);
         }
       }
 
@@ -892,16 +914,22 @@ class ServiceGenerator {
     }
 
     const all = Object.values(templateParams).flat();
+    const sourcesByName = new Map<string, Set<string>>();
+    for (const parameter of all) {
+      let sources = sourcesByName.get(parameter.name);
+      if (!sources) {
+        sources = new Set();
+        sourcesByName.set(parameter.name, sources);
+      }
+      sources.add(parameter.in);
+    }
     const used = new Set(
       all
-        .filter(
-          (parameter) =>
-            !all.some((other) => other.name === parameter.name && other.in !== parameter.in),
-        )
+        .filter((parameter) => sourcesByName.get(parameter.name)!.size === 1)
         .map((parameter) => parameter.name),
     );
     all.forEach((parameter) => {
-      if (!all.some((other) => other.name === parameter.name && other.in !== parameter.in)) {
+      if (sourcesByName.get(parameter.name)!.size === 1) {
         parameter.inputName = parameter.name;
         return;
       }
@@ -918,25 +946,35 @@ class ServiceGenerator {
   public getInterfaceTP(): InterfaceTemplate[] {
     const result: InterfaceTemplate[] = [];
     for (const [name, schema] of Object.entries(this.openAPIData.components?.schemas || {})) {
-      const resolved: ResolvedSchema =
-        (schema as LegacySchema).enum &&
-        !(schema as LegacySchema).enum!.some(
-          (value) => typeof value === "boolean" || value === null,
-        ) &&
-        this.config.enumStyle === "enum"
-          ? this.resolveEnumObject(schema as LegacySchema)
-          : (this.config.declareType === "interface" || this.config.nullable) &&
-              !(schema as LegacySchema).$ref &&
-              !(schema as LegacySchema).nullable &&
-              !(schema as LegacySchema).allOf?.length &&
-              !(schema as LegacySchema).oneOf?.length &&
-              !(schema as LegacySchema).anyOf?.length &&
-              !(schema as LegacySchema).enum &&
-              (schema as LegacySchema).additionalProperties === undefined &&
-              Object.keys((schema as LegacySchema).properties || {}).length > 0 &&
-              [undefined, "object"].includes((schema as LegacySchema).type)
-            ? this.resolveProperties(schema as LegacySchema)
-            : { type: this.getType(schema) };
+      const schemaObject = schema as LegacySchema;
+      const canDeclareEnum =
+        this.config.enumStyle === "enum" &&
+        schemaObject.enum &&
+        !schemaObject.enum.some((value) => typeof value === "boolean" || value === null);
+
+      let resolved: ResolvedSchema;
+      if (canDeclareEnum) {
+        resolved = this.resolveEnumObject(schemaObject);
+      } else {
+        const needsPropertyDeclaration =
+          this.config.declareType === "interface" || this.config.nullable;
+        const isSimpleObject =
+          !schemaObject.$ref &&
+          !schemaObject.nullable &&
+          !schemaObject.allOf?.length &&
+          !schemaObject.oneOf?.length &&
+          !schemaObject.anyOf?.length &&
+          !schemaObject.enum &&
+          schemaObject.additionalProperties === undefined &&
+          Object.keys(schemaObject.properties || {}).length > 0 &&
+          [undefined, "object"].includes(schemaObject.type);
+
+        if (needsPropertyDeclaration && isSimpleObject) {
+          resolved = this.resolveProperties(schemaObject);
+        } else {
+          resolved = { type: this.getType(schema) };
+        }
+      }
       result.push({
         typeName: this.schemaTypeName(name),
         type: resolved.type || "unknown",
@@ -949,7 +987,7 @@ class ServiceGenerator {
       const typeName = this.getTypeName(api);
       if (seen.has(typeName)) continue;
       seen.add(typeName);
-      const parameters = Object.values(this.getParamsTP(api.parameters, api.path)).flat();
+      const parameters = Object.values(this.collectParameters(api.parameters, api.path)).flat();
       if (!parameters.length) continue;
       result.push({
         typeName,
@@ -1046,7 +1084,9 @@ class ServiceGenerator {
 
   // 获取 TS 类型的属性列表
   getProps(schemaObject: LegacySchema): TemplateProperty[] {
-    const requiredPropKeys = schemaObject?.required ?? false;
+    const requiredPropKeys = Array.isArray(schemaObject.required)
+      ? new Set(schemaObject.required)
+      : undefined;
     return schemaObject.properties
       ? Object.keys(schemaObject.properties).map((propName) => {
           const schema: LegacySchema =
@@ -1057,9 +1097,7 @@ class ServiceGenerator {
             type: this.getType(schema),
             desc: this.getDescription(schema),
             // 如果没有 required 信息，默认全部是非必填
-            required: Array.isArray(requiredPropKeys)
-              ? requiredPropKeys.some((key) => key === propName)
-              : false,
+            required: requiredPropKeys?.has(propName) ?? false,
           };
         })
       : [];
@@ -1112,7 +1150,14 @@ class ServiceGenerator {
     let enumStr;
     switch (this.config.enumStyle) {
       case "enum":
-        enumStr = `{${enumArray.map((v, index) => `${JSON.stringify(typeof v === "string" ? v : `Value${index}`)}=${JSON.stringify(typeof v === "boolean" ? String(v) : v)}`).join(",")}}`;
+        enumStr = `{${enumArray
+          .map(
+            (v, index) =>
+              `${JSON.stringify(
+                typeof v === "string" ? v : `Value${index}`,
+              )}=${JSON.stringify(typeof v === "boolean" ? String(v) : v)}`,
+          )
+          .join(",")}}`;
         break;
       case "string-literal":
         enumStr = Array.from(new Set(enumArray.map((v) => JSON.stringify(v)))).join(" | ");
@@ -1123,7 +1168,7 @@ class ServiceGenerator {
     }
 
     return {
-      isEnum: this.config.enumStyle == "enum",
+      isEnum: this.config.enumStyle === "enum",
       type: Array.isArray(enumArray) ? enumStr : "string",
     };
   }
@@ -1212,7 +1257,10 @@ class ServiceGenerator {
   private genTypeFilesByTag(declarations: InterfaceTemplate[]): GeneratedFile[] {
     const remaining = new Map(declarations.map((type) => [type.typeName, type]));
     const tags = Object.keys(this.apiData);
-    const templates: { fileName: string; context: TemplateContexts["interface"] }[] = [];
+    const templates: {
+      fileName: string;
+      context: TemplateContexts["interface"];
+    }[] = [];
     tags.forEach((tag, index) => {
       const names = new Set(
         this.apiData[tag].map((api) =>
