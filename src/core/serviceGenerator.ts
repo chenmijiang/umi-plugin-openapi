@@ -453,11 +453,12 @@ function defaultGetFileTag(
   apiPath: string,
   _apiMethod: string,
 ): string[] {
-  return operationObject["x-swagger-router-controller"]
-    ? [operationObject["x-swagger-router-controller"]]
-    : operationObject.tags || [operationObject.operationId!] || [
-        apiPath.replace("/", "").split("/")[1],
-      ];
+  const controller = operationObject["x-swagger-router-controller"];
+  if (controller) return [controller];
+  if (operationObject.tags?.length) return operationObject.tags;
+  if (operationObject.operationId) return [operationObject.operationId];
+  const segments = apiPath.split("/").filter(Boolean);
+  return [segments[1] || ""];
 }
 class ServiceGenerator {
   protected apiData: TagAPIDataType = Object.create(null);

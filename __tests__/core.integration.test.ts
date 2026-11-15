@@ -159,6 +159,84 @@ async function generationFixture(onTestFinished: TestContext["onTestFinished"], 
   };
 }
 
+test.each([
+  {
+    name: "controller takes precedence over tags and operationId",
+    path: "/api/users",
+    operation: {
+      "x-swagger-router-controller": "controller",
+      tags: ["users"],
+      operationId: "list",
+    },
+    group: "controller",
+  },
+  {
+    name: "tags take precedence over operationId",
+    path: "/api/users",
+    operation: { tags: ["users"], operationId: "list" },
+    group: "users",
+  },
+  {
+    name: "operationId is used without tags",
+    path: "/api/users",
+    operation: { operationId: "list" },
+    group: "list",
+  },
+  {
+    name: "empty tags fall back to operationId",
+    path: "/api/users",
+    operation: { tags: [], operationId: "list" },
+    group: "list",
+  },
+  {
+    name: "missing metadata falls back to the second path segment",
+    path: "/api/users",
+    operation: {},
+    group: "users",
+  },
+  {
+    name: "empty tags fall back to the path",
+    path: "/api/users",
+    operation: { tags: [] },
+    group: "users",
+  },
+  {
+    name: "single segment paths without metadata retain the service in the unnamed group",
+    path: "/users",
+    operation: {},
+    group: "api0",
+  },
+  {
+    name: "root paths without metadata retain the service in the unnamed group",
+    path: "/",
+    operation: {},
+    group: "api0",
+  },
+])("default service grouping: $name", async ({ path, operation, group }) => {
+  const config = await generationFixture(onTestFinished, {
+    ...schema,
+    paths: {
+      [path]: { get: { ...operation, responses: { "200": { description: "OK" } } } },
+    },
+  });
+  await generateService({ ...config, mockFolder: undefined });
+  const outputPath = join(config.serversPath, "api");
+  const serviceFiles = (await readdir(outputPath)).filter(
+    (name) => name.endsWith(".ts") && name !== "index.ts" && !name.endsWith(".d.ts"),
+  );
+  expect(serviceFiles).toEqual([`${group}.ts`]);
+  const calls: string[] = [];
+  const service = await loadGenerated<Record<string, () => Promise<unknown>>>(
+    join(outputPath, `${group}.ts`),
+    async (url: string) => {
+      calls.push(url);
+    },
+  );
+  expect(Object.keys(service)).toHaveLength(1);
+  await Object.values(service)[0]();
+  expect(calls).toEqual([path]);
+});
+
 async function loadGenerated<T>(filename: string, request?: unknown): Promise<T> {
   const source = await readFile(filename, "utf8");
   const { code } = await transform(source, {
