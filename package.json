@@ -1,6 +1,6 @@
 {
   "name": "umi-plugin-openapi",
-  "version": "1.0.2",
+  "version": "1.0.3-beta.0",
   "description": "Umi plugin with a local OpenAPI service and mock generator",
   "keywords": [
     "api-client",
